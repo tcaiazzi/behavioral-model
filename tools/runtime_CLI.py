@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python2
 
 # Copyright 2013-present Barefoot Networks, Inc.
 #
@@ -27,12 +27,7 @@ import sys
 import struct
 import json
 from functools import wraps
-
-from thrift import Thrift
-from thrift.transport import TSocket
-from thrift.transport import TTransport
-from thrift.protocol import TBinaryProtocol
-from thrift.protocol import TMultiplexedProtocol
+import bmpy_utils as utils
 
 from bm_runtime.standard import Standard
 from bm_runtime.standard.ttypes import *
@@ -93,7 +88,7 @@ def get_parser():
                         type=str, action="store", default='localhost')
 
     parser.add_argument('--json', help='JSON description of P4 program',
-                        type=str, action="store", required=True)
+                        type=str, action="store", required=False)
 
     parser.add_argument('--pre', help='Packet Replication Engine used by target',
                         type=str, choices=['None', 'SimplePre', 'SimplePreLAG'],
@@ -106,20 +101,22 @@ ACTIONS = {}
 METER_ARRAYS = {}
 COUNTER_ARRAYS = {}
 REGISTER_ARRAYS = {}
+CUSTOM_CRC_CALCS = {}
 
 class MatchType:
     EXACT = 0
     LPM = 1
     TERNARY = 2
-    VALID = 3 # not yet supported
+    VALID = 3
+    RANGE = 4
 
     @staticmethod
     def to_str(x):
-        return {0: "exact", 1: "lpm", 2: "ternary", 3: "valid"}[x]
+        return {0: "exact", 1: "lpm", 2: "ternary", 3: "valid", 4: "range"}[x]
 
     @staticmethod
     def from_str(x):
-        return {"exact": 0, "lpm": 1, "ternary": 2, "valid": 3}[x]
+        return {"exact": 0, "lpm": 1, "ternary": 2, "valid": 3, "range": 4}[x]
 
 class Table:
     def __init__(self, name, id_):
@@ -164,7 +161,9 @@ class MeterArray:
         self.name = name
         self.id_ = id_
         self.type_ = None
+        self.is_direct = None
         self.size = None
+        self.binding = None
         self.rate_count = None
 
         METER_ARRAYS[name] = self
@@ -198,7 +197,15 @@ class RegisterArray:
     def register_str(self):
         return "{0:30} [{1}]".format(self.name, self.size)
 
-def load_json(json_src):
+def reset_config():
+    TABLES.clear()
+    ACTIONS.clear()
+    METER_ARRAYS.clear()
+    COUNTER_ARRAYS.clear()
+    REGISTER_ARRAYS.clear()
+    CUSTOM_CRC_CALCS.clear()
+
+def load_json_str(json_str):
     def get_header_type(header_name, j_headers):
         for h in j_headers:
             if h["name"] == header_name:
@@ -208,63 +215,77 @@ def load_json(json_src):
     def get_field_bitwidth(header_type, field_name, j_header_types):
         for h in j_header_types:
             if h["name"] != header_type: continue
-            for f, bw in h["fields"]:
+            for t in h["fields"]:
+                # t can have a third element (field signedness)
+                f, bw = t[0], t[1]
                 if f == field_name:
                     return bw
         assert(0)
 
-    with open(json_src, 'r') as f:
-        json_ = json.load(f)
+    reset_config()
+    json_ = json.loads(json_str)
 
-        for j_action in json_["actions"]:
-            action = Action(j_action["name"], j_action["id"])
-            for j_param in j_action["runtime_data"]:
-                action.runtime_data += [(j_param["name"], j_param["bitwidth"])]
+    for j_action in json_["actions"]:
+        action = Action(j_action["name"], j_action["id"])
+        for j_param in j_action["runtime_data"]:
+            action.runtime_data += [(j_param["name"], j_param["bitwidth"])]
 
-        for j_pipeline in json_["pipelines"]:
-            for j_table in j_pipeline["tables"]:
-                table = Table(j_table["name"], j_table["id"])
-                table.match_type = MatchType.from_str(j_table["match_type"])
-                table.type_ = TableType.from_str(j_table["type"])
-                for action in j_table["actions"]:
-                    table.actions[action] = ACTIONS[action]
-                for j_key in j_table["key"]:
-                    target = j_key["target"]
-                    match_type = MatchType.from_str(j_key["match_type"])
-                    if match_type == MatchType.VALID:
-                        field_name = target + "_valid"
-                        bitwidth = 1
-                    else:
-                        field_name = ".".join(target)
-                        header_type = get_header_type(target[0],
-                                                      json_["headers"])
-                        bitwidth = get_field_bitwidth(header_type, target[1],
-                                                      json_["header_types"])
-                    table.key += [(field_name, match_type, bitwidth)]
-
-        if "meter_arrays" in json_:
-            for j_meter in json_["meter_arrays"]:
-                meter_array = MeterArray(j_meter["name"], j_meter["id"])
-                meter_array.size = j_meter["size"]
-                meter_array.type_ = MeterType.from_str(j_meter["type"])
-                meter_array.rate_count = j_meter["rate_count"]
-
-        if "counter_arrays" in json_:
-            for j_counter in json_["counter_arrays"]:
-                counter_array = CounterArray(j_counter["name"], j_counter["id"])
-                counter_array.is_direct = j_counter["is_direct"]
-                if counter_array.is_direct:
-                    counter_array.binding = j_counter["binding"]
+    for j_pipeline in json_["pipelines"]:
+        for j_table in j_pipeline["tables"]:
+            table = Table(j_table["name"], j_table["id"])
+            table.match_type = MatchType.from_str(j_table["match_type"])
+            table.type_ = TableType.from_str(j_table["type"])
+            for action in j_table["actions"]:
+                table.actions[action] = ACTIONS[action]
+            for j_key in j_table["key"]:
+                target = j_key["target"]
+                match_type = MatchType.from_str(j_key["match_type"])
+                if match_type == MatchType.VALID:
+                    field_name = target + "_valid"
+                    bitwidth = 1
                 else:
-                    counter_array.size = j_counter["size"]
+                    field_name = ".".join(target)
+                    header_type = get_header_type(target[0],
+                                                  json_["headers"])
+                    bitwidth = get_field_bitwidth(header_type, target[1],
+                                                  json_["header_types"])
+                table.key += [(field_name, match_type, bitwidth)]
 
-        if "register_arrays" in json_:
-            for j_register in json_["register_arrays"]:
-                register_array = RegisterArray(j_register["name"],
-                                               j_register["id"])
-                register_array.size = j_register["size"]
-                register_array.width = j_register["bitwidth"]
+    if "meter_arrays" in json_:
+        for j_meter in json_["meter_arrays"]:
+            meter_array = MeterArray(j_meter["name"], j_meter["id"])
+            if "is_direct" in j_meter and j_meter["is_direct"]:
+                meter_array.is_direct = True
+                meter_array.binding = j_meter["binding"]
+            else:
+                meter_array.is_direct = False
+                meter_array.size = j_meter["size"]
+            meter_array.type_ = MeterType.from_str(j_meter["type"])
+            meter_array.rate_count = j_meter["rate_count"]
 
+    if "counter_arrays" in json_:
+        for j_counter in json_["counter_arrays"]:
+            counter_array = CounterArray(j_counter["name"], j_counter["id"])
+            counter_array.is_direct = j_counter["is_direct"]
+            if counter_array.is_direct:
+                counter_array.binding = j_counter["binding"]
+            else:
+                counter_array.size = j_counter["size"]
+
+    if "register_arrays" in json_:
+        for j_register in json_["register_arrays"]:
+            register_array = RegisterArray(j_register["name"],
+                                           j_register["id"])
+            register_array.size = j_register["size"]
+            register_array.width = j_register["bitwidth"]
+
+    if "calculations" in json_:
+        for j_calc in json_["calculations"]:
+            calc_name = j_calc["name"]
+            if j_calc["algo"] == "crc16_custom":
+                CUSTOM_CRC_CALCS[calc_name] = 16
+            elif j_calc["algo"] == "crc32_custom":
+                CUSTOM_CRC_CALCS[calc_name] = 32
 
 class UIn_Error(Exception):
     def __init__(self, info=""):
@@ -420,6 +441,7 @@ _match_types_mapping = {
     MatchType.LPM : BmMatchParamType.LPM,
     MatchType.TERNARY : BmMatchParamType.TERNARY,
     MatchType.VALID : BmMatchParamType.VALID,
+    MatchType.RANGE : BmMatchParamType.RANGE,
 }
 
 def parse_match_key(table, key_fields):
@@ -461,6 +483,20 @@ def parse_match_key(table, key_fields):
             key = bool(int(field))
             param = BmMatchParam(type = param_type,
                                  valid = BmMatchParamValid(key))
+        elif param_type == BmMatchParamType.RANGE:
+            start, end = field.split("->")
+            start = bytes_to_string(parse_param_(start, bw))
+            end = bytes_to_string(parse_param_(end, bw))
+            if len(start) != len(end):
+                raise UIn_MatchKeyError(
+                    "start and end have different lengths in expression %s" % field
+                )
+            if start > end:
+                raise UIn_MatchKeyError(
+                    "start is less than end in expression %s" % field
+                )
+            param = BmMatchParam(type = param_type,
+                                 range = BmMatchParamRange(start, end))
         else:
             assert(0)
         params.append(param)
@@ -474,7 +510,8 @@ def BmMatchParam_to_str(self):
         (self.exact.to_str() if self.exact else "") +\
         (self.lpm.to_str() if self.lpm else "") +\
         (self.ternary.to_str() if self.ternary else "") +\
-        (self.valid.to_str() if self.valid else "")
+        (self.valid.to_str() if self.valid else "") +\
+        (self.range.to_str() if self.range else "")
 
 def BmMatchParamExact_to_str(self):
     return printable_byte_str(self.key)
@@ -488,40 +525,19 @@ def BmMatchParamTernary_to_str(self):
 def BmMatchParamValid_to_str(self):
     return ""
 
+def BmMatchParamRange_to_str(self):
+    return printable_byte_str(self.start) + " -> " + printable_byte_str(self.end_)
+
 BmMatchParam.to_str = BmMatchParam_to_str
 BmMatchParamExact.to_str = BmMatchParamExact_to_str
 BmMatchParamLPM.to_str = BmMatchParamLPM_to_str
 BmMatchParamTernary.to_str = BmMatchParamTernary_to_str
 BmMatchParamValid.to_str = BmMatchParamValid_to_str
+BmMatchParamRange.to_str = BmMatchParamRange_to_str
 
 # services is [(service_name, client_class), ...]
 def thrift_connect(thrift_ip, thrift_port, services):
-    # Make socket
-    transport = TSocket.TSocket(thrift_ip, thrift_port)
-    # Buffering is critical. Raw sockets are very slow
-    transport = TTransport.TBufferedTransport(transport)
-    # Wrap in a protocol
-    bprotocol = TBinaryProtocol.TBinaryProtocol(transport)
-
-    clients = []
-
-    for service_name, service_cls in services:
-        if service_name is None:
-            clients.append(None)
-            continue
-        protocol = TMultiplexedProtocol.TMultiplexedProtocol(bprotocol, service_name)
-        client = service_cls(protocol)
-        clients.append(client)
-
-    # Connect!
-    try:
-        transport.open()
-    except TTransport.TTransportException:
-        print "Could not connect to thrift client on port", thrift_port
-        print "Make sure the switch is running and that you have the right port"
-        sys.exit(1)
-
-    return clients
+    return utils.thrift_connect(thrift_ip, thrift_port, services)
 
 def handle_bad_input(f):
     @wraps(f)
@@ -555,7 +571,44 @@ def handle_bad_input(f):
         except InvalidDevMgrOperation as e:
             error = DevMgrErrorCode._VALUES_TO_NAMES[e.code]
             print "Invalid device manager operation (%s)" % error
+        except InvalidCrcOperation as e:
+            error = CrcErrorCode._VALUES_TO_NAMES[e.code]
+            print "Invalid crc operation (%s)" % error
     return handle
+
+# thrift does not support unsigned integers
+def hex_to_i16(h):
+    x = int(h, 0)
+    if (x > 0xFFFF):
+        raise UIn_Error("Integer cannot fit within 16 bits")
+    if (x > 0x7FFF): x-= 0x10000
+    return x
+def i16_to_hex(h):
+    x = int(h)
+    if (x & 0x8000): x+= 0x10000
+    return x
+def hex_to_i32(h):
+    x = int(h, 0)
+    if (x > 0xFFFFFFFF):
+        raise UIn_Error("Integer cannot fit within 32 bits")
+    if (x > 0x7FFFFFFF): x-= 0x100000000
+    return x
+def i32_to_hex(h):
+    x = int(h)
+    if (x & 0x80000000): x+= 0x100000000
+    return x
+
+def parse_bool(s):
+    if s == "true" or s == "True":
+        return True
+    if s == "false" or s  == "False":
+        return False
+    try:
+        s = int(s, 0)
+        return bool(s)
+    except:
+        pass
+    raise UIn_Error("Invalid bool parameter")
 
 class RuntimeAPI(cmd.Cmd):
     prompt = 'RuntimeCmd: '
@@ -613,21 +666,27 @@ class RuntimeAPI(cmd.Cmd):
             return res
         return [r for r in res if r.startswith(text)]
 
+    @handle_bad_input
     def do_show_tables(self, line):
-        "List tables defined in the P4 program"
+        "List tables defined in the P4 program: show_tables"
+        self.exactly_n_args(line.split(), 0)
         for table_name in sorted(TABLES):
             print TABLES[table_name].table_str()
 
+    @handle_bad_input
     def do_show_actions(self, line):
-        "List tables defined in the P4 program"
+        "List actions defined in the P4 program: show_actions"
+        self.exactly_n_args(line.split(), 0)
         for action_name in sorted(ACTIONS):
             print ACTIONS[action_name].action_str()
 
     def _complete_tables(self, text):
         return self._complete_res(TABLES, text)
 
+    @handle_bad_input
     def do_table_show_actions(self, line):
-        "List tables defined in the P4 program"
+        "List one table's actions as per the P4 program: table_show_actions <table_name>"
+        self.exactly_n_args(line.split(), 1)
         table = TABLES[line]
         for action_name in sorted(table.actions):
             print ACTIONS[action_name].action_str()
@@ -635,8 +694,10 @@ class RuntimeAPI(cmd.Cmd):
     def complete_table_show_actions(self, text, line, start_index, end_index):
         return self._complete_tables(self, text)
 
+    @handle_bad_input
     def do_table_info(self, line):
-        "Show info about a table"
+        "Show info about a table: table_info <table_name>"
+        self.exactly_n_args(line.split(), 1)
         table = TABLES[line]
         print table.table_str()
         print "*" * 80
@@ -743,7 +804,7 @@ class RuntimeAPI(cmd.Cmd):
                 "Table %s has no action %s" % (table_name, action_name)
             )
 
-        if table.match_type == MatchType.TERNARY:
+        if table.match_type in {MatchType.TERNARY, MatchType.RANGE}:
             try:
                 priority = int(args.pop(-1))
             except:
@@ -959,7 +1020,7 @@ class RuntimeAPI(cmd.Cmd):
         else:
             self.check_indirect(table)
 
-        if table.match_type == MatchType.TERNARY:
+        if table.match_type in {MatchType.TERNARY, MatchType.RANGE}:
             try:
                 priority = int(args.pop(-1))
             except:
@@ -1343,9 +1404,50 @@ class RuntimeAPI(cmd.Cmd):
         self.mc_client.bm_mc_set_lag_membership(0, lag_index, port_map_str)
 
     @handle_bad_input
+    def do_mc_dump(self, line):
+        "Dump entries in multicast engine"
+        self.check_has_pre()
+        json_dump = self.mc_client.bm_mc_get_entries(0)
+        try:
+            mc_json = json.loads(json_dump)
+        except:
+            print "Exception when retrieving MC entries"
+            return
+
+        l1_handles = {}
+        for h in mc_json["l1_handles"]:
+            l1_handles[h["handle"]] = (h["rid"], h["l2_handle"])
+        l2_handles = {}
+        for h in mc_json["l2_handles"]:
+            l2_handles[h["handle"]] = (h["ports"], h["lags"])
+
+        print "=========="
+        print "MC ENTRIES"
+        for mgrp in mc_json["mgrps"]:
+            print "**********"
+            mgid = mgrp["id"]
+            print "mgrp({})".format(mgid)
+            for L1h in mgrp["l1_handles"]:
+                rid, L2h = l1_handles[L1h]
+                print "  -> (L1h={}, rid={})".format(L1h, rid),
+                ports, lags = l2_handles[L2h]
+                print "-> (ports=[{}], lags=[{}])".format(
+                    ", ".join([str(p) for p in ports]),
+                    ", ".join([str(l) for l in lags]))
+
+        print "=========="
+        print "LAGS"
+        for lag in mc_json["lags"]:
+            print "lag({})".format(lag["id"]),
+            print "-> ports=[{}]".format(", ".join([str(p) for p in ports]))
+        print "=========="
+
+    @handle_bad_input
     def do_load_new_config_file(self, line):
         "Load new json config: load_new_config_file <path to .json file>"
-        filename = line
+        args = line.split()
+        self.exactly_n_args(args, 1)
+        filename = args[0]
         if not os.path.isfile(filename):
             raise UIn_Error("Not a valid filename")
         print "Loading new Json config"
@@ -1356,6 +1458,7 @@ class RuntimeAPI(cmd.Cmd):
             except:
                 raise UIn_Error("Not a valid JSON file")
             self.client.bm_load_new_config(json_str)
+            load_json_str(json_str)
 
     @handle_bad_input
     def do_swap_configs(self, line):
@@ -1397,7 +1500,10 @@ class RuntimeAPI(cmd.Cmd):
         self.at_least_n_args(args, 2)
         meter_name = args[0]
         meter = self.get_res("meter", meter_name, METER_ARRAYS)
-        index = args[1]
+        try:
+            index = int(args[1])
+        except:
+            raise UIn_Error("Bad format for index")
         rates = args[2:]
         if len(rates) != meter.rate_count:
             raise UIn_Error(
@@ -1415,13 +1521,38 @@ class RuntimeAPI(cmd.Cmd):
                 raise UIn_Error("Error while parsing rates")
         if meter.is_direct:
             table_name = meter.binding
-            print "this is the direct meter for table", table_name
-            value = self.client.bm_mt_set_meter_rates(
-                0, table_name, index, new_rates)
+            self.client.bm_mt_set_meter_rates(0, table_name, index, new_rates)
         else:
             self.client.bm_meter_set_rates(0, meter_name, index, new_rates)
 
     def complete_meter_set_rates(self, text, line, start_index, end_index):
+        return self._complete_meters(text)
+
+    @handle_bad_input
+    def do_meter_get_rates(self, line):
+        "Retrieve rates for a meter: meter_get_rates <name> <index>"
+        args = line.split()
+        self.exactly_n_args(args, 2)
+        meter_name = args[0]
+        meter = self.get_res("meter", meter_name, METER_ARRAYS)
+        try:
+            index = int(args[1])
+        except:
+            raise UIn_Error("Bad format for index")
+        # meter.rate_count
+        if meter.is_direct:
+            table_name = meter.binding
+            rates = self.client.bm_mt_get_meter_rates(0, table_name, index)
+        else:
+            rates = self.client.bm_meter_get_rates(0, meter_name, index)
+        if len(rates) != meter.rate_count:
+            print "WARNING: expected", meter.rate_count, "rates",
+            print "but only received", len(rates)
+        for idx, rate in enumerate(rates):
+            print "{}: info rate = {}, burst size = {}".format(
+                idx, rate.units_per_micros, rate.burst_size)
+
+    def complete_meter_get_rates(self, text, line, start_index, end_index):
         return self._complete_meters(text)
 
     def _complete_meters(self, text):
@@ -1511,20 +1642,203 @@ class RuntimeAPI(cmd.Cmd):
     def complete_register_write(self, text, line, start_index, end_index):
         return self._complete_registers(text)
 
+    @handle_bad_input
+    def do_register_reset(self, line):
+        "Reset all the cells in the register array to 0: register_reset <name>"
+        args = line.split()
+        self.exactly_n_args(args, 1)
+        register_name = args[0]
+        self.client.bm_register_reset(0, register_name)
+
+    def complete_register_reset(self, text, line, start_index, end_index):
+        return self._complete_registers(text)
+
     def _complete_registers(self, text):
         return self._complete_res(REGISTER_ARRAYS, text)
 
+    def dump_action_and_data(self, action_name, action_data):
+        def hexstr(v):
+            return "".join("{:02x}".format(ord(c)) for c in v)
+
+        print "Action entry: {} - {}".format(
+            action_name, ", ".join([hexstr(a) for a in action_data]))
+
+    def dump_action_entry(self, a_entry):
+        if a_entry.action_type == BmActionEntryType.NONE:
+            print "EMPTY"
+        elif a_entry.action_type == BmActionEntryType.ACTION_DATA:
+            self.dump_action_and_data(a_entry.action_name, a_entry.action_data)
+        elif a_entry.action_type == BmActionEntryType.MBR_HANDLE:
+            print "Index: member({})".format(a_entry.mbr_handle)
+        elif a_entry.action_type == BmActionEntryType.GRP_HANDLE:
+            print "Index: group({})".format(a_entry.grp_handle)
+
+    def dump_one_member(self, member):
+        print "Dumping member {}".format(member.mbr_handle)
+        self.dump_action_and_data(member.action_name, member.action_data)
+
+    def dump_members(self, members):
+        for m in members:
+            print "**********"
+            self.dump_one_member(m)
+
+    def dump_one_group(self, group):
+        print "Dumping group {}".format(group.grp_handle)
+        print "Members: [{}]".format(", ".join(
+            [str(h) for h in group.mbr_handles]))
+
+    def dump_groups(self, groups):
+        for g in groups:
+            print "**********"
+            self.dump_one_group(g)
+
+    def dump_one_entry(self, table, entry):
+        if table.key:
+            out_name_w = max(20, max([len(t[0]) for t in table.key]))
+
+        def hexstr(v):
+            return "".join("{:02x}".format(ord(c)) for c in v)
+        def dump_exact(p):
+             return hexstr(p.exact.key)
+        def dump_lpm(p):
+            return "{}/{}".format(hexstr(p.lpm.key), p.lpm.prefix_length)
+        def dump_ternary(p):
+            return "{} &&& {}".format(hexstr(p.ternary.key),
+                                      hexstr(p.ternary.mask))
+        def dump_range(p):
+            return "{} -> {}".format(hexstr(p.range.start),
+                                     hexstr(p.range.end_))
+        def dump_valid(p):
+            return "01" if p.valid.key else "00"
+        pdumpers = {"exact": dump_exact, "lpm": dump_lpm,
+                    "ternary": dump_ternary, "valid": dump_valid,
+                    "range": dump_range}
+
+        print "Dumping entry {}".format(hex(entry.entry_handle))
+        print "Match key:"
+        for p, k in zip(entry.match_key, table.key):
+            assert(k[1] == p.type)
+            pdumper = pdumpers[MatchType.to_str(p.type)]
+            print "* {0:{w}}: {1:10}{2}".format(
+                k[0], MatchType.to_str(p.type).upper(),
+                pdumper(p), w=out_name_w)
+        if (entry.options.priority >= 0):
+            print "Priority: {}".format(entry.options.priority)
+        self.dump_action_entry(entry.action_entry)
+
+    @handle_bad_input
+    def do_table_dump_entry(self, line):
+        "Display some information about a table entry: table_dump <table name> <entry handle>"
+        args = line.split()
+        self.exactly_n_args(args, 2)
+        table_name = args[0]
+
+        table = self.get_res("table", table_name, TABLES)
+
+        try:
+            entry_handle = int(args[1])
+        except:
+            raise UIn_Error("Bad format for entry handle")
+
+        entry = self.client.bm_mt_get_entry(0, table_name, entry_handle)
+        self.dump_one_entry(table, entry)
+
+    def complete_table_dump_entry(self, text, line, start_index, end_index):
+        return self._complete_tables(text)
+
+    @handle_bad_input
+    def do_table_dump_member(self, line):
+        "Display some information about a member: table_dump <table name> <member handle>"
+        args = line.split()
+        self.exactly_n_args(args, 2)
+        table_name = args[0]
+
+        table = self.get_res("table", table_name, TABLES)
+
+        try:
+            mbr_handle = int(args[1])
+        except:
+            raise UIn_Error("Bad format for member handle")
+
+        member = self.client.bm_mt_indirect_get_member(0, table_name,
+                                                       mbr_handle)
+        self.dump_one_member(member)
+
+    def complete_table_dump_member(self, text, line, start_index, end_index):
+        return self._complete_tables(text)
+
+    @handle_bad_input
+    def do_table_dump_group(self, line):
+        "Display some information about a group: table_dump <table name> <group handle>"
+        args = line.split()
+        self.exactly_n_args(args, 2)
+        table_name = args[0]
+
+        table = self.get_res("table", table_name, TABLES)
+
+        try:
+            grp_handle = int(args[1])
+        except:
+            raise UIn_Error("Bad format for group handle")
+
+        group = self.client.bm_mt_indirect_ws_get_group(0, table_name,
+                                                        grp_handle)
+        self.dump_one_group(group)
+
+    def complete_table_dump_group(self, text, line, start_index, end_index):
+        return self._complete_tables(text)
+
     @handle_bad_input
     def do_table_dump(self, line):
-        "Display some (non-formatted) information about a table: table_dump <table_name>"
+        "Display some information about a table: table_dump <table name>"
         args = line.split()
         self.exactly_n_args(args, 1)
         table_name = args[0]
-        self.get_res("table", table_name, TABLES)
-        print self.client.bm_dump_table(0, table_name)
+        table = self.get_res("table", table_name, TABLES)
+        entries = self.client.bm_mt_get_entries(0, table_name)
+
+        print "=========="
+        print "TABLE ENTRIES"
+
+        for e in entries:
+            print "**********"
+            self.dump_one_entry(table, e)
+
+        if table.type_ == TableType.indirect or\
+           table.type_ == TableType.indirect_ws:
+            members = self.client.bm_mt_indirect_get_members(0, table_name)
+            print "=========="
+            print "MEMBERS"
+            self.dump_members(members)
+
+        if table.type_ == TableType.indirect_ws:
+            groups = self.client.bm_mt_indirect_ws_get_groups(0, table_name)
+            print "=========="
+            print "GROUPS"
+            self.dump_groups(groups)
+
+        # default entry
+        default_entry = self.client.bm_mt_get_default_entry(0, table_name)
+        print "=========="
+        print "Dumping default entry"
+        self.dump_action_entry(default_entry)
+
+        print "=========="
 
     def complete_table_dump(self, text, line, start_index, end_index):
         return self._complete_tables(text)
+
+    # the next 2 functions are temporary, they ensure backwards compatibility
+    # the current table_dump CLI command used to be called table_dump_2 (the old
+    # table_dump command has been deprecated)
+    # TODO(antonin): remove
+    @handle_bad_input
+    def do_table_dump_2(self, line):
+        "This command is deprecated, use table_dump instead"
+        self.do_table_dump(line)
+
+    def complete_table_dump_2(self, text, line, start_index, end_index):
+        return self.complete_table_dump(text, line, start_index, end_index)
 
     @handle_bad_input
     def do_port_add(self, line):
@@ -1552,15 +1866,107 @@ class RuntimeAPI(cmd.Cmd):
             raise UIn_Error("Bad format for port_num, must be an integer")
         self.client.bm_dev_mgr_remove_port(port_num)
 
+    @handle_bad_input
+    def do_show_ports(self, line):
+        "Shows the ports connected to the switch: show_ports"
+        self.exactly_n_args(line.split(), 0)
+        ports = self.client.bm_dev_mgr_show_ports()
+        print "{:^10}{:^20}{:^10}{}".format(
+            "port #", "iface name", "status", "extra info")
+        print "=" * 50
+        for port_info in ports:
+            status = "UP" if port_info.is_up else "DOWN"
+            extra_info = "; ".join(
+                [k + "=" + v for k, v in port_info.extra.items()])
+            print "{:^10}{:^20}{:^10}{}".format(
+                port_info.port_num, port_info.iface_name, status, extra_info)
+
+    @handle_bad_input
+    def do_switch_info(self, line):
+        "Show some basic info about the switch: switch_info"
+        self.exactly_n_args(line.split(), 0)
+        info = self.client.bm_mgmt_get_info()
+        attributes = [t[2] for t in info.thrift_spec[1:]]
+        out_attr_w = 5 + max(len(a) for a in attributes)
+        for a in attributes:
+            print "{:{w}}: {}".format(a, getattr(info, a), w=out_attr_w)
+
+    @handle_bad_input
+    def do_reset_state(self, line):
+        "Reset all state in the switch (table entries, registers, ...), but P4 config is preserved: reset_state"
+        self.exactly_n_args(line.split(), 0)
+        self.client.bm_reset_state()
+
+    @handle_bad_input
+    def do_write_config_to_file(self, line):
+        "Retrieves the JSON config currently used by the switch and dumps it to user-specified file"
+        args = line.split()
+        self.exactly_n_args(args, 1)
+        filename = args[0]
+        json_cfg = self.client.bm_get_config()
+        with open(filename, 'w') as f:
+            f.write(json_cfg)
+
+    @handle_bad_input
+    def do_serialize_state(self, line):
+        "Serialize the switch state and dumps it to user-specified file"
+        args = line.split()
+        self.exactly_n_args(args, 1)
+        filename = args[0]
+        state = self.client.bm_serialize_state()
+        with open(filename, 'w') as f:
+            f.write(state)
+
+    def set_crc_parameters_common(self, line, crc_width=16):
+        conversion_fn = {16: hex_to_i16, 32: hex_to_i32}[crc_width]
+        config_type = {16: BmCrc16Config, 32: BmCrc32Config}[crc_width]
+        thrift_fn = {16: self.client.bm_set_crc16_custom_parameters,
+                     32: self.client.bm_set_crc32_custom_parameters}[crc_width]
+        args = line.split()
+        self.exactly_n_args(args, 6)
+        name = args[0]
+        if name not in CUSTOM_CRC_CALCS or CUSTOM_CRC_CALCS[name] != crc_width:
+            raise UIn_ResourceError("crc{}_custom".format(crc_width), name)
+        config_args = [conversion_fn(a) for a in args[1:4]]
+        config_args += [parse_bool(a) for a in args[4:6]]
+        crc_config = config_type(*config_args)
+        thrift_fn(0, name, crc_config)
+
+    def _complete_crc(self, text, crc_width=16):
+        crcs = sorted(
+            [c for c, w in CUSTOM_CRC_CALCS.items() if w == crc_width])
+        if not text:
+            return crcs
+        return [c for c in crcs if c.startswith(text)]
+
+    @handle_bad_input
+    def do_set_crc16_parameters(self, line):
+        "Change the parameters for a custom crc16 hash: set_crc16_parameters <name> <polynomial> <initial remainder> <final xor value> <reflect data?> <reflect remainder?>"
+        self.set_crc_parameters_common(line, 16)
+
+    def complete_set_crc16_parameters(self, text, line, start_index, end_index):
+        return self._complete_crc(text, 16)
+
+    @handle_bad_input
+    def do_set_crc32_parameters(self, line):
+        "Change the parameters for a custom crc32 hash: set_crc32_parameters <name> <polynomial> <initial remainder> <final xor value> <reflect data?> <reflect remainder?>"
+        self.set_crc_parameters_common(line, 32)
+
+    def complete_set_crc32_parameters(self, text, line, start_index, end_index):
+        return self._complete_crc(text, 32)
+
+def load_json_config(standard_client=None, json_path=None):
+    load_json_str(utils.get_json_config(standard_client, json_path))
+
 def main():
     args = get_parser().parse_args()
-
-    load_json(args.json)
 
     standard_client, mc_client = thrift_connect(
         args.thrift_ip, args.thrift_port,
         RuntimeAPI.get_thrift_services(args.pre)
     )
+
+    load_json_config(standard_client, args.json)
 
     RuntimeAPI(args.pre, standard_client, mc_client).cmdloop()
 

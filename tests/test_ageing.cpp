@@ -29,7 +29,7 @@
 
 #include <cassert>
 
-#include "bm_sim/ageing.h"
+#include <bm/bm_sim/ageing.h>
 
 #include "utils.h"
 
@@ -76,12 +76,14 @@ protected:
     phv_factory.push_back_header("test1", testHeader1, testHeaderType);
     phv_factory.push_back_header("test2", testHeader2, testHeaderType);
 
-    key_builder.push_back_field(testHeader1, 0, 16);
+    key_builder.push_back_field(testHeader1, 0, 16, MatchKeyParam::Type::EXACT);
 
     typedef MatchTableAbstract::ActionEntry ActionEntry;
     typedef MatchUnitExact<ActionEntry> MUExact;
 
-    std::unique_ptr<MUExact> match_unit(new MUExact(1, key_builder));
+    LookupStructureFactory factory;
+
+    std::unique_ptr<MUExact> match_unit(new MUExact(1, key_builder, &factory));
 
     // counters disabled, ageing enabled
     table = std::unique_ptr<MatchTable>(
@@ -151,7 +153,7 @@ TEST_F(AgeingTest, OneNotification) {
   ASSERT_NE(MemoryAccessor::Status::CAN_READ, ageing_writer->check_status());
   sleep_for(milliseconds(150));
   ASSERT_NE(MemoryAccessor::Status::CAN_READ, ageing_writer->check_status());
-  
+
   auto tp1 = clock::now();
   ASSERT_TRUE(send_pkt(key, &lookup_handle));
   ageing_writer->read(buffer, sizeof(buffer));

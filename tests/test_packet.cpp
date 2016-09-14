@@ -21,8 +21,9 @@
 #include <gtest/gtest.h>
 
 #include <vector>
+#include <memory>
 
-#include "bm_sim/packet.h"
+#include <bm/bm_sim/packet.h>
 
 using namespace bm;
 
@@ -34,7 +35,7 @@ TEST(CopyIdGenerator, Test) {
   ASSERT_EQ(1u, gen.get(packet_id));
   ASSERT_EQ(2u, gen.add_one(packet_id));
   gen.remove_one(packet_id);
-  ASSERT_EQ(1u, gen.get(packet_id));
+  ASSERT_EQ(2u, gen.get(packet_id));
   gen.reset(packet_id);
   ASSERT_EQ(0u, gen.get(packet_id));
 }
@@ -55,6 +56,7 @@ class PHVSourceTest : public PHVSourceIface {
  private:
   std::unique_ptr<PHV> get_(size_t cxt) override {
     assert(phv_factories[cxt]);
+    ++count;
     ++created.at(cxt);
     return phv_factories[cxt]->create();
   }
@@ -62,6 +64,7 @@ class PHVSourceTest : public PHVSourceIface {
   void release_(size_t cxt, std::unique_ptr<PHV> phv) override {
     // let the PHV be destroyed
     (void) cxt; (void) phv;
+    --count;
     ++destroyed.at(cxt);
   }
 
@@ -69,7 +72,12 @@ class PHVSourceTest : public PHVSourceIface {
     phv_factories.at(cxt) = factory;
   }
 
+  size_t phvs_in_use_(size_t cxt) override {
+    return count;
+  }
+
   std::vector<const PHVFactory *> phv_factories;
+  size_t count{0};
   std::vector<size_t> created;
   std::vector<size_t> destroyed;
 };
@@ -152,4 +160,49 @@ TEST_F(PacketTest, Truncate) {
   ASSERT_EQ(first_length, pkt_2.get_data_size());
   ASSERT_TRUE(std::equal(
       data.begin(), data.begin() + pkt_2.get_data_size(), pkt_2.data()));
+}
+
+TEST_F(PacketTest, PacketRegisters) {
+  const uint64_t v1 = 0u;
+  const uint64_t v2 = 6789u;
+  const size_t idx = 0u;
+  ASSERT_LT(idx, Packet::nb_registers);
+  auto packet = get_packet(0);
+  packet.set_register(idx, v1);
+  ASSERT_EQ(v1, packet.get_register(idx));
+  packet.set_register(idx, v2);
+  ASSERT_EQ(v2, packet.get_register(idx));
+}
+
+TEST_F(PacketTest, Exit) {
+  auto packet = get_packet(0);
+  ASSERT_FALSE(packet.is_marked_for_exit());
+  packet.mark_for_exit();
+  ASSERT_TRUE(packet.is_marked_for_exit());
+  packet.reset_exit();
+  ASSERT_FALSE(packet.is_marked_for_exit());
+}
+
+TEST_F(PacketTest, CopyId) {
+  auto packet_0 = std::unique_ptr<Packet>(new Packet(get_packet(0)));
+  ASSERT_EQ(0u, packet_0->get_copy_id());
+  auto packet_1 = packet_0->clone_with_phv_ptr();
+  ASSERT_EQ(1u, packet_1->get_copy_id());
+  auto packet_2 = packet_0->clone_with_phv_ptr();
+  ASSERT_EQ(2u, packet_2->get_copy_id());
+
+  // reset so now 0.0, 0.2 exist but not 0.1
+  // new packet should get 0.3
+  packet_1.reset(nullptr);
+  auto packet_3 = packet_0->clone_with_phv_ptr();
+  ASSERT_EQ(3u, packet_3->get_copy_id());
+
+  packet_3.reset(nullptr);
+  packet_2.reset(nullptr);
+  packet_0.reset(nullptr);
+
+  auto packet_0_new = std::unique_ptr<Packet>(new Packet(get_packet(0)));
+  ASSERT_EQ(0u, packet_0_new->get_copy_id());
+  auto packet_1_new = packet_0_new->clone_with_phv_ptr();
+  ASSERT_EQ(1u, packet_1_new->get_copy_id());
 }

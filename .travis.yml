@@ -4,11 +4,25 @@ sudo: required
 
 language: cpp
 
+matrix:
+  include:
+    - os: linux
+      compiler: gcc
+      env: COMPILER=g++-4.8 GCOV=gcov-4.8
+
+    - os: linux
+      compiler: gcc
+      env: COMPILER=g++-5 GCOV=gcov-5
+
+    - os: linux
+      env: COMPILER=clang++-3.6
+
 addons:
   apt:
     sources:
       - boost-latest
       - ubuntu-toolchain-r-test
+      - llvm-toolchain-precise-3.6
     packages:
       - libjudy-dev
       - libgmp-dev
@@ -26,33 +40,36 @@ addons:
       - bison
       - pkg-config
       - g++-4.8
+      - g++-5
+      - clang-3.6
       - libssl-dev
+      - python-pip
 
 before_install:
-  - g++ -v
-  - sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 99
-  - sudo update-alternatives --install /usr/bin/gcov gcov /usr/bin/gcov-4.8 99
-  - g++ -v
   - wget https://s3-us-west-2.amazonaws.com/p4lang/thrift_bin.tar.gz
   - tar -xzvf thrift_bin.tar.gz -C $HOME/
   - export PATH=$PATH:$HOME/thrift/bin/
   - export LDFLAGS="$LDFLAGS -L$HOME/thrift/lib"
   - export CPPFLAGS="$CPPFLAGS -I$HOME/thrift/include"
   - export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/thrift/lib
-  - bash build/travis/install-nanomsg.sh
+  - sudo pip install --upgrade thrift
+  - bash travis/install-nanomsg.sh
   - sudo ldconfig
-  - bash build/travis/install-nnpy.sh
+  - bash travis/install-nnpy.sh
 
 install:
-  - ./autogen.sh && ./configure --enable-coverage && make all -j2
+  - ./autogen.sh
+  - if [ "$GCOV" != "" ]; then ./configure CXX=$COMPILER --with-pdfixed --with-stress-tests --enable-coverage; fi
+  - if [ "$GCOV" = "" ]; then ./configure CXX=$COMPILER --with-pdfixed --with-stress-tests; fi
+  - make all -j2
 
 # command to run tests, e.g. python setup.py test
 script:
-  - python build/travis/check-nnpy.py
+  - python travis/check-nnpy.py
   - make check
   - bash tools/check_style.sh
 
 # code coverage
 after_success:
-  - cd modules/bm_sim/src; gcov -r -o .libs/ *.cpp; cd -
-  - bash <(curl -s https://codecov.io/bash)
+  - if [ "$GCOV" != "" ]; then (cd src/bm_sim; $GCOV -r -o .libs/ *.cpp); fi
+  - if [ "$GCOV" != "" ]; then bash <(curl -s https://codecov.io/bash); fi

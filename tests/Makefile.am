@@ -1,18 +1,32 @@
+if COND_STRESS_TESTS
+    MAYBE_STRESS_TESTS = stress_tests
+endif
+
+SUBDIRS = . $(MAYBE_STRESS_TESTS)
+
+noinst_LTLIBRARIES = libtestutils.la
+
+libtestutils_la_SOURCES = utils.h utils.cpp
+libtestutils_la_LIBADD = $(top_builddir)/src/bm_sim/libbmsim.la
+
 AM_CPPFLAGS += \
 -isystem $(top_srcdir)/third_party \
--I$(top_srcdir)/modules/bm_sim/include \
--I$(top_srcdir)/modules/bm_apps/include
+-DTESTDATADIR=\"$(srcdir)/testdata\"
 AM_CXXFLAGS = -pthread
 LDADD = \
-$(top_srcdir)/third_party/gtest/libgtest.la \
-$(top_srcdir)/modules/bm_sim/libbmsim.la \
-$(top_srcdir)/modules/bf_lpm_trie/libbflpmtrie.la \
-$(top_srcdir)/modules/bm_apps/libbmapps.la \
-$(top_srcdir)/third_party/jsoncpp/libjson.la \
--lboost_system -lboost_thread -lboost_filesystem
+$(top_builddir)/third_party/gtest/libgtest.la \
+$(top_builddir)/src/bm_runtime/libbmruntime.la \
+$(top_builddir)/src/bm_apps/libbmapps.la \
+$(top_builddir)/src/bm_sim/libbmsim.la \
+$(top_builddir)/src/bf_lpm_trie/libbflpmtrie.la \
+$(top_builddir)/thrift_src/libruntimestubs.la \
+$(THRIFT_LIB) \
+$(top_builddir)/third_party/jsoncpp/libjson.la \
+$(builddir)/libtestutils.la \
+-lboost_system -lboost_thread -lboost_filesystem -lboost_program_options
 
 # Define unit tests
-common_source = main.cpp
+common_source = main.cpp bmi_stubs.c primitives.cpp
 TESTS = test_actions \
 test_checksums \
 test_conditionals \
@@ -34,7 +48,11 @@ test_counters \
 test_pcap \
 test_fields \
 test_devmgr \
-test_packet
+test_packet \
+test_extern \
+test_switch \
+test_target_parser \
+test_runtime_iface
 
 check_PROGRAMS = $(TESTS) test_all
 
@@ -61,6 +79,11 @@ test_fields_SOURCES   	   = $(common_source) test_fields.cpp
 test_pcap_SOURCES          = $(common_source) test_pcap.cpp
 test_devmgr_SOURCES        = $(common_source) test_devmgr.cpp
 test_packet_SOURCES        = $(common_source) test_packet.cpp
+test_extern_SOURCES        = $(common_source) test_extern.cpp
+test_switch_SOURCES        = $(common_source) test_switch.cpp
+test_target_parser_SOURCES = $(common_source) test_target_parser.cpp
+test_runtime_iface_SOURCES = $(common_source) test_runtime_iface.cpp
+
 test_all_SOURCES = $(common_source) \
 test_actions.cpp \
 test_checksums.cpp \
@@ -83,4 +106,21 @@ test_counters.cpp \
 test_pcap.cpp \
 test_fields.cpp \
 test_devmgr.cpp \
-test_packet.cpp
+test_packet.cpp \
+test_extern.cpp \
+test_switch.cpp \
+test_target_parser.cpp \
+test_runtime_iface.cpp
+
+EXTRA_DIST = \
+testdata/en0.pcap \
+testdata/lo0.pcap \
+testdata/empty_config.json \
+testdata/empty_config.md5 \
+testdata/serialize.p4 \
+testdata/serialize.json \
+testdata/runtime_iface.p4 \
+testdata/runtime_iface.json \
+testdata/one_header.json \
+testdata/parse_vset.p4 \
+testdata/parse_vset.json

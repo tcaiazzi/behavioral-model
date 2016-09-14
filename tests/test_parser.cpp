@@ -20,8 +20,12 @@
 
 #include <gtest/gtest.h>
 
-#include "bm_sim/parser.h"
-#include "bm_sim/deparser.h"
+#include <bm/bm_sim/parser.h>
+#include <bm/bm_sim/deparser.h>
+
+#include <chrono>
+#include <thread>
+#include <mutex>
 
 using namespace bm;
 
@@ -120,11 +124,11 @@ class ParserTest : public ::testing::Test {
     phv_source->set_phv_factory(0, &phv_factory);
 
     ParseSwitchKeyBuilder ethernetKeyBuilder;
-    ethernetKeyBuilder.push_back_field(ethernetHeader, 2); // ethertype
+    ethernetKeyBuilder.push_back_field(ethernetHeader, 2, 16); // ethertype
     ethernetParseState.set_key_builder(ethernetKeyBuilder);
 
     ParseSwitchKeyBuilder ipv4KeyBuilder;
-    ipv4KeyBuilder.push_back_field(ipv4Header, 8); // protocol
+    ipv4KeyBuilder.push_back_field(ipv4Header, 8, 8); // protocol
     ipv4ParseState.set_key_builder(ipv4KeyBuilder);
 
     ethernetParseState.add_extract(ethernetHeader);
@@ -477,13 +481,13 @@ class ParseSwitchKeyBuilderTest : public ::testing::Test {
 
 TEST_F(ParseSwitchKeyBuilderTest, Mix) {
   ParseSwitchKeyBuilder builder;
-  builder.push_back_field(testHeader1, 2);
+  builder.push_back_field(testHeader1, 2, 48);
   builder.push_back_lookahead(0, 16);
-  builder.push_back_field(testHeader2, 0);
-  builder.push_back_field(testHeader2, 1);
+  builder.push_back_field(testHeader2, 0, 16);
+  builder.push_back_field(testHeader2, 1, 32);
   builder.push_back_lookahead(16, 32);
   builder.push_back_lookahead(20, 20);
-  builder.push_back_stack_field(testHeaderStack, 1);
+  builder.push_back_stack_field(testHeaderStack, 1, 32);
 
   const unsigned char data_[6] = {0xb5, 0x9d, 0xfd, 0x17, 0xd5, 0xd7};
   const char *data = (char *) data_;
@@ -574,11 +578,11 @@ class MPLSParserTest : public ::testing::Test {
     phv_source->set_phv_factory(0, &phv_factory);
 
     ParseSwitchKeyBuilder ethernetKeyBuilder;
-    ethernetKeyBuilder.push_back_field(ethernetHeader, 2); // ethertype
+    ethernetKeyBuilder.push_back_field(ethernetHeader, 2, 16); // ethertype
     ethernetParseState.set_key_builder(ethernetKeyBuilder);
 
     ParseSwitchKeyBuilder MPLSKeyBuilder;
-    MPLSKeyBuilder.push_back_stack_field(MPLSStack, 2); // bos
+    MPLSKeyBuilder.push_back_stack_field(MPLSStack, 2, 1); // bos
     MPLSParseState.set_key_builder(MPLSKeyBuilder);
 
     ethernetParseState.add_extract(ethernetHeader);
@@ -827,7 +831,7 @@ class IPv4TLVParsingTest : public ::testing::Test {
     // parse_ethernet
     ethernetParseState.add_extract(ethernetHeader);
     ParseSwitchKeyBuilder ethernetKeyBuilder;
-    ethernetKeyBuilder.push_back_field(ethernetHeader, 2); // ethertype
+    ethernetKeyBuilder.push_back_field(ethernetHeader, 2, 16); // ethertype
     ethernetParseState.set_key_builder(ethernetKeyBuilder);
     ethernetParseState.add_switch_case(ByteContainer("0x0800"),
 				       &ipv4ParseState);
@@ -850,7 +854,7 @@ class IPv4TLVParsingTest : public ::testing::Test {
     expr.build();
     ipv4ParseState.add_set_from_expression(pMeta, 0, expr);
     ParseSwitchKeyBuilder ipv4KeyBuilder;
-    ipv4KeyBuilder.push_back_field(ipv4Header, 1); // IHL
+    ipv4KeyBuilder.push_back_field(ipv4Header, 1, 4); // IHL
     ipv4ParseState.set_key_builder(ipv4KeyBuilder);
     ipv4ParseState.add_switch_case(ByteContainer("0x05"), nullptr);
     ipv4ParseState.set_default_switch_case(&ipv4OptionsParseState);
@@ -864,7 +868,7 @@ class IPv4TLVParsingTest : public ::testing::Test {
        }
     */
     ParseSwitchKeyBuilder ipv4OptionsKeyBuilder;
-    ipv4OptionsKeyBuilder.push_back_field(pMeta, 0); // byte_counter
+    ipv4OptionsKeyBuilder.push_back_field(pMeta, 0, 8); // byte_counter
     ipv4OptionsKeyBuilder.push_back_lookahead(0, 8);
     ipv4OptionsParseState.set_key_builder(ipv4OptionsKeyBuilder);
     ipv4OptionsParseState.add_switch_case_with_mask(
@@ -1060,10 +1064,12 @@ TEST_F(IPv4TLVParsingTest, BothOptions) {
   const ByteContainer f1("0x00a1");
   const ByteContainer f2("0x000000a2");
 
-  for(const auto order: {"AB", "BA"}) {
+  enum class Order { AB, BA };
+
+  for(const auto order: {Order::AB, Order::BA}) {
     ByteContainer buf = get_ipv4_base();
 
-    if(order == "AB") {
+    if(order == Order::AB) {
       add_optionA(&buf, f1, f2);
       add_optionB(&buf);
     }
@@ -1148,7 +1154,7 @@ class IPv4VLParsingTest : public ::testing::Test {
     // parse_ethernet
     ethernetParseState.add_extract(ethernetHeader);
     ParseSwitchKeyBuilder ethernetKeyBuilder;
-    ethernetKeyBuilder.push_back_field(ethernetHeader, 2); // ethertype
+    ethernetKeyBuilder.push_back_field(ethernetHeader, 2, 16); // ethertype
     ethernetParseState.set_key_builder(ethernetKeyBuilder);
     ethernetParseState.add_switch_case(ByteContainer("0x0800"),
 				       &ipv4ParseState);
@@ -1254,4 +1260,261 @@ TEST_F(IPv4VLParsingTest, Deparser) {
 
   ASSERT_EQ(buf_save.size(), packet.get_data_size());
   ASSERT_EQ(0, memcmp(buf_save.data(), packet.data(), buf_save.size()));
+}
+
+
+class ParseVSetTest : public ::testing::Test {
+ protected:
+  PHVFactory phv_factory;
+
+  HeaderType headerType;
+  ParseState parseState;
+  header_id_t header_id{0};
+
+  Parser parser;
+
+  std::unique_ptr<PHVSourceIface> phv_source{nullptr};
+
+  ParseVSetTest()
+      : headerType("header_t", 0),
+        parseState("parse_header", 0),
+        parser("test_parser", 0),
+        phv_source(PHVSourceIface::make_phv_source()) {
+
+    headerType.push_back_field("f16", 16);
+    headerType.push_back_field("f32", 32);
+    headerType.push_back_field("f8", 8);
+    headerType.push_back_field("f3", 3);
+    headerType.push_back_field("f13", 13);
+
+    phv_factory.push_back_header("header", header_id, headerType);
+  }
+
+  virtual void SetUp() {
+    phv_source->set_phv_factory(0, &phv_factory);
+
+    parser.set_init_state(&parseState);
+  }
+
+  void set_parse_kb(const std::vector<std::pair<int, int> > &fields) {
+    ParseSwitchKeyBuilder kb;
+    for (const auto &f : fields)
+      kb.push_back_field(header_id, f.first, f.second);
+    parseState.set_key_builder(kb);
+  }
+
+  Packet get_pkt() const {
+    Packet pkt = Packet::make_new(phv_source.get());
+    pkt.get_phv()->get_header(header_id).mark_valid();
+    return pkt;
+  }
+
+  // virtual void TearDown() { }
+};
+
+TEST_F(ParseVSetTest, Basic) {
+  ParseVSet vset("vset", 0, 24);
+  set_parse_kb({{0, 16}, {2, 8}});  // f16, f8
+  ParseState dummy1("dummy1", 1);
+  ParseState dummy2("dummy2", 2);
+  int f16_v, f8_v;
+  size_t bytes_parsed = 0;
+
+  auto pkt = get_pkt();
+  PHV *phv = pkt.get_phv();
+
+  f16_v = 0xabcd; f8_v = 0xef;
+  phv->get_field(header_id, 0).set(f16_v);
+  phv->get_field(header_id, 2).set(f8_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+
+  ByteContainer mask("0xff00ff");
+  parseState.add_switch_case_vset(&vset, &dummy1);
+  parseState.add_switch_case_vset_with_mask(&vset, mask, &dummy2);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+
+  ByteContainer v1("0xabcdef");
+  vset.add(v1);
+  ASSERT_EQ(&dummy1, parseState(&pkt, nullptr, &bytes_parsed));
+
+  f16_v = 0xab11; f8_v = 0xef;
+  phv->get_field(header_id, 0).set(f16_v);
+  phv->get_field(header_id, 2).set(f8_v);
+  ASSERT_EQ(&dummy2, parseState(&pkt, nullptr, &bytes_parsed));
+
+  f16_v = 0x1b11; f8_v = 0xef;
+  phv->get_field(header_id, 0).set(f16_v);
+  phv->get_field(header_id, 2).set(f8_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+
+  vset.remove(v1);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+}
+
+TEST_F(ParseVSetTest, OneField) {
+  ParseVSet vset("vset", 0, 16);
+  set_parse_kb({{0, 16}});  // f16
+  ParseState dummy1("dummy1", 1);
+  int f16_v;
+  size_t bytes_parsed = 0;
+
+  auto pkt = get_pkt();
+  PHV *phv = pkt.get_phv();
+  f16_v = 0xabcd;
+  phv->get_field(header_id, 0).set(f16_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+
+  parseState.add_switch_case_vset(&vset, &dummy1);
+  ByteContainer v1("0xabcd");
+  vset.add(v1);
+  ASSERT_EQ(&dummy1, parseState(&pkt, nullptr, &bytes_parsed));
+
+  f16_v = 0xab0d;
+  phv->get_field(header_id, 0).set(f16_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+}
+
+TEST_F(ParseVSetTest, OneFieldNonAligned) {
+  ParseVSet vset("vset", 0, 13);
+  set_parse_kb({{4, 13}});  // f13
+  ParseState dummy1("dummy1", 1);
+  int f13_v;
+  size_t bytes_parsed = 0;
+
+  auto pkt = get_pkt();
+  PHV *phv = pkt.get_phv();
+  f13_v = 0x12e6;
+  phv->get_field(header_id, 4).set(f13_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+
+  parseState.add_switch_case_vset(&vset, &dummy1);
+  ByteContainer v1("0x12e6");
+  vset.add(v1);
+  ASSERT_EQ(&dummy1, parseState(&pkt, nullptr, &bytes_parsed));
+
+  f13_v = 0x02e6;
+  phv->get_field(header_id, 4).set(f13_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+
+  f13_v = 0x12e7;
+  phv->get_field(header_id, 4).set(f13_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+}
+
+TEST_F(ParseVSetTest, NonAlignedWithMask) {
+  ParseVSet vset("vset", 0, 16);
+  set_parse_kb({{3, 3}, {4, 13}});  // f3, f13
+  ParseState dummy1("dummy1", 1);
+  int f3_v, f13_v;
+  size_t bytes_parsed = 0;
+
+  auto pkt = get_pkt();
+  PHV *phv = pkt.get_phv();
+  f3_v = 0x5; f13_v = 0x12e6;
+  phv->get_field(header_id, 3).set(f3_v);
+  phv->get_field(header_id, 4).set(f13_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+
+  ByteContainer mask("0x0201c0");
+  parseState.add_switch_case_vset_with_mask(&vset, mask, &dummy1);
+  ByteContainer v1("0xb2e6");  // compressed
+  vset.add(v1);
+  ASSERT_TRUE(vset.contains(v1));
+  // testing with exactly v1
+  ASSERT_EQ(&dummy1, parseState(&pkt, nullptr, &bytes_parsed));
+
+  // change f3 to break match
+  f3_v = 0x7; f13_v = 0x12e6;
+  phv->get_field(header_id, 3).set(f3_v);
+  phv->get_field(header_id, 4).set(f13_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+
+  // change f13 to break match
+  f3_v = 0x5; f13_v = 0x1266;
+  phv->get_field(header_id, 3).set(f3_v);
+  phv->get_field(header_id, 4).set(f13_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+
+  // change f3 without breaking match
+  f3_v = 0x4; f13_v = 0x12e6;
+  phv->get_field(header_id, 3).set(f3_v);
+  phv->get_field(header_id, 4).set(f13_v);
+  ASSERT_EQ(&dummy1, parseState(&pkt, nullptr, &bytes_parsed));
+
+  // change f13 without breaking match
+  f3_v = 0x5; f13_v = 0x16e7;
+  phv->get_field(header_id, 3).set(f3_v);
+  phv->get_field(header_id, 4).set(f13_v);
+  ASSERT_EQ(&dummy1, parseState(&pkt, nullptr, &bytes_parsed));
+
+  // removing v1
+  vset.remove(v1);
+  ASSERT_FALSE(vset.contains(v1));
+  f3_v = 0x5; f13_v = 0x12e6;
+  phv->get_field(header_id, 3).set(f3_v);
+  phv->get_field(header_id, 4).set(f13_v);
+  ASSERT_EQ(nullptr, parseState(&pkt, nullptr, &bytes_parsed));
+}
+
+extern bool WITH_VALGRIND; // defined in main.cpp
+
+// test added after I detected a race condition in ParseVSet's shadow copies
+TEST_F(ParseVSetTest, ConcurrentRuntimeAccess) {
+  ParseVSet vset("vset", 0, 16);
+  set_parse_kb({{3, 3}, {4, 13}});  // f3, f13
+  ParseState dummy1("dummy1", 1);
+  int f3_v, f13_v;
+  size_t bytes_parsed = 0;
+
+  parseState.add_switch_case_vset(&vset, &dummy1);
+  ByteContainer v1("0xb2e6");  // compressed
+  vset.add(v1);
+  ASSERT_TRUE(vset.contains(v1));
+
+  // testing with exactly v1
+  auto pkt = get_pkt();
+  PHV *phv = pkt.get_phv();
+  f3_v = 0x5; f13_v = 0x12e6;
+  phv->get_field(header_id, 3).set(f3_v);
+  phv->get_field(header_id, 4).set(f13_v);
+  ASSERT_EQ(&dummy1, parseState(&pkt, nullptr, &bytes_parsed));
+
+  std::mutex m1;
+  std::mutex m2;
+  using clock = std::chrono::system_clock;
+
+  auto runtime_access = [&vset, &v1](std::mutex &m, bool do_add,
+                                     clock::time_point end) {
+    while (clock::now() < end) {
+      std::unique_lock<std::mutex> L(m);
+      if (do_add) vset.add(v1);
+      else vset.remove(v1);
+    }
+  };
+
+  std::vector<bool> consistency_results;
+  auto consistency_check = [&vset, &v1, &m1, &m2, &consistency_results,
+                            &dummy1, &pkt, this](
+      clock::time_point end) {
+    size_t bparsed = 0;
+    while (clock::now() < end) {
+      std::unique_lock<std::mutex> L1(m1, std::defer_lock);
+      std::unique_lock<std::mutex> L2(m2, std::defer_lock);
+      std::lock(L1, L2);
+      bool r1 = vset.contains(v1);
+      bool r2 = (&dummy1 == parseState(&pkt, nullptr, &bparsed));
+      consistency_results.push_back(r1 == r2);
+    }
+  };
+
+  int runtime_secs = WITH_VALGRIND ? 20 : 5;
+  clock::time_point end = clock::now() + std::chrono::seconds(runtime_secs);
+  std::thread t1(runtime_access, std::ref(m1), true, end);
+  std::thread t2(runtime_access, std::ref(m2), false, end);
+  std::thread t3(consistency_check, end);
+  t1.join(); t2.join(); t3.join();
+  size_t count = std::count(
+      consistency_results.begin(), consistency_results.end(), false);
+  EXPECT_LT(0, consistency_results.size());
+  ASSERT_EQ(0, count);
 }

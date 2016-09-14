@@ -18,6 +18,15 @@
  *
  */
 
+#include <bm/bm_sim/queue.h>
+#include <bm/bm_sim/packet.h>
+#include <bm/bm_sim/parser.h>
+#include <bm/bm_sim/tables.h>
+#include <bm/bm_sim/switch.h>
+#include <bm/bm_sim/event_logger.h>
+
+#include <bm/bm_runtime/bm_runtime.h>
+
 #include <unistd.h>
 
 #include <iostream>
@@ -26,15 +35,6 @@
 #include <fstream>
 #include <string>
 #include <chrono>
-
-#include "bm_sim/queue.h"
-#include "bm_sim/packet.h"
-#include "bm_sim/parser.h"
-#include "bm_sim/tables.h"
-#include "bm_sim/switch.h"
-#include "bm_sim/event_logger.h"
-
-#include "bm_runtime/bm_runtime.h"
 
 using bm::Switch;
 using bm::Queue;
@@ -52,6 +52,9 @@ class SimpleSwitch : public Switch {
 
   int receive(int port_num, const char *buffer, int len) {
     static int pkt_id = 0;
+
+    if (this->do_swap() == 0)  // a swap took place
+      swap_happened = true;
 
     auto packet = new_packet_ptr(port_num, pkt_id++, len,
                                  bm::PacketBuffer(2048, buffer, len));
@@ -76,6 +79,7 @@ class SimpleSwitch : public Switch {
  private:
   Queue<std::unique_ptr<Packet> > input_buffer;
   Queue<std::unique_ptr<Packet> > output_buffer;
+  bool swap_happened{false};
 };
 
 void SimpleSwitch::transmit_thread() {
@@ -103,15 +107,17 @@ void SimpleSwitch::pipeline_thread() {
     phv = packet->get_phv();
 
     int ingress_port = packet->get_ingress_port();
+    (void) ingress_port;
     BMLOG_DEBUG_PKT(*packet, "Processing packet received on port {}",
                     ingress_port);
 
-    // swap is enabled, so update pointers if needed
-    if (this->do_swap() == 0) {  // a swap took place
+    // update pointers if needed
+    if (swap_happened) {  // a swap took place
       ingress_mau = this->get_pipeline("ingress");
       egress_mau = this->get_pipeline("egress");
       parser = this->get_parser("parser");
       deparser = this->get_deparser("deparser");
+      swap_happened = false;
     }
 
     parser->parse(packet.get());

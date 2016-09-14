@@ -18,6 +18,16 @@
  *
  */
 
+#include <bm/bm_sim/queue.h>
+#include <bm/bm_sim/packet.h>
+#include <bm/bm_sim/parser.h>
+#include <bm/bm_sim/tables.h>
+#include <bm/bm_sim/switch.h>
+#include <bm/bm_sim/event_logger.h>
+#include <bm/bm_sim/simple_pre.h>
+
+#include <bm/bm_runtime/bm_runtime.h>
+
 #include <unistd.h>
 
 #include <iostream>
@@ -26,16 +36,6 @@
 #include <fstream>
 #include <string>
 #include <chrono>
-
-#include "bm_sim/queue.h"
-#include "bm_sim/packet.h"
-#include "bm_sim/parser.h"
-#include "bm_sim/tables.h"
-#include "bm_sim/switch.h"
-#include "bm_sim/event_logger.h"
-#include "bm_sim/simple_pre.h"
-
-#include "bm_runtime/bm_runtime.h"
 
 using bm::Switch;
 using bm::Queue;
@@ -51,6 +51,14 @@ class SimpleSwitch : public Switch {
   SimpleSwitch()
     : input_buffer(1024), output_buffer(128), pre(new McSimplePre()) {
     add_component<McSimplePre>(pre);
+
+    add_required_field("standard_metadata", "ingress_port");
+    add_required_field("standard_metadata", "egress_port");
+    add_required_field("intrinsic_metadata", "mgid");
+    add_required_field("intrinsic_metadata", "learn_id");
+
+    force_arith_header("standard_metadata");
+    force_arith_header("intrinsic_metadata");
   }
 
   int receive(int port_num, const char *buffer, int len) {
@@ -111,8 +119,6 @@ void SimpleSwitch::pipeline_thread() {
                     ingress_port);
 
     phv->get_field("standard_metadata.ingress_port").set(ingress_port);
-    ingress_port = phv->get_field("standard_metadata.ingress_port").get_int();
-    std::cout << ingress_port << std::endl;
 
     parser->parse(packet.get());
     ingress_mau->apply(packet.get());

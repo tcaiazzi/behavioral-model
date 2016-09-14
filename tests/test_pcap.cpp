@@ -17,18 +17,22 @@
 
 #include <boost/filesystem.hpp>
 
-#include "bm_sim/pcap_file.h"
+#include <bm/bm_sim/pcap_file.h>
 #include <stdio.h>
 
 using namespace bm;
 
 namespace fs = boost::filesystem;
 
+#ifndef TESTDATADIR
+#define TESTDATADIR "testdata"
+#endif
+
 // Google Test fixture for pcap tests
 class PcapTest : public ::testing::Test {
 protected:
   PcapTest()
-    : testDataFolder("testdata"), testfile1("en0.pcap"), testfile2("lo0.pcap"),
+    : testDataFolder(TESTDATADIR), testfile1("en0.pcap"), testfile2("lo0.pcap"),
       tmpfile("tmp.pcap"), received(0), receiver(nullptr) {}
 
   virtual void SetUp()  {}
@@ -49,7 +53,7 @@ protected:
   }
 
   std::string getTmpFile() {
-    fs::path path = fs::path(testDataFolder) / fs::path(tmpfile);
+    fs::path path = fs::path(tmpfile);
     return path.string();
   }
 
@@ -62,6 +66,7 @@ public:
     received++;
     if (receiver != nullptr)
       receiver->send_packet(port_num, buffer, len);
+    return received;
   }
 
 protected:

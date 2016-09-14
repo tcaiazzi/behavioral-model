@@ -18,7 +18,9 @@
  *
  */
 
-#include "bm_sim/actions.h"
+#include <bm/bm_sim/actions.h>
+
+#include <random>
 
 template <typename... Args>
 using ActionPrimitive = bm::ActionPrimitive<Args...>;
@@ -32,17 +34,17 @@ using bm::RegisterArray;
 using bm::NamedCalculation;
 using bm::HeaderStack;
 
-class modify_field : public ActionPrimitive<Field &, const Data &> {
-  void operator ()(Field &f, const Data &d) {
-    f.set(d);
+class modify_field : public ActionPrimitive<Data &, const Data &> {
+  void operator ()(Data &dst, const Data &src) {
+    dst.set(src);
   }
 };
 
 REGISTER_PRIMITIVE(modify_field);
 
 class modify_field_rng_uniform
-  : public ActionPrimitive<Field &, const Data &, const Data &> {
-  void operator ()(Field &f, const Data &b, const Data &e) {
+  : public ActionPrimitive<Data &, const Data &, const Data &> {
+  void operator ()(Data &f, const Data &b, const Data &e) {
     // TODO(antonin): a little hacky, fix later if there is a need using GMP
     // random fns
     using engine = std::default_random_engine;
@@ -72,40 +74,40 @@ class subtract_from_field : public ActionPrimitive<Field &, const Data &> {
 
 REGISTER_PRIMITIVE(subtract_from_field);
 
-class add : public ActionPrimitive<Field &, const Data &, const Data &> {
-  void operator ()(Field &f, const Data &d1, const Data &d2) {
+class add : public ActionPrimitive<Data &, const Data &, const Data &> {
+  void operator ()(Data &f, const Data &d1, const Data &d2) {
     f.add(d1, d2);
   }
 };
 
 REGISTER_PRIMITIVE(add);
 
-class subtract : public ActionPrimitive<Field &, const Data &, const Data &> {
-  void operator ()(Field &f, const Data &d1, const Data &d2) {
+class subtract : public ActionPrimitive<Data &, const Data &, const Data &> {
+  void operator ()(Data &f, const Data &d1, const Data &d2) {
     f.sub(d1, d2);
   }
 };
 
 REGISTER_PRIMITIVE(subtract);
 
-class bit_xor : public ActionPrimitive<Field &, const Data &, const Data &> {
-  void operator ()(Field &f, const Data &d1, const Data &d2) {
+class bit_xor : public ActionPrimitive<Data &, const Data &, const Data &> {
+  void operator ()(Data &f, const Data &d1, const Data &d2) {
     f.bit_xor(d1, d2);
   }
 };
 
 REGISTER_PRIMITIVE(bit_xor);
 
-class bit_or : public ActionPrimitive<Field &, const Data &, const Data &> {
-  void operator ()(Field &f, const Data &d1, const Data &d2) {
+class bit_or : public ActionPrimitive<Data &, const Data &, const Data &> {
+  void operator ()(Data &f, const Data &d1, const Data &d2) {
     f.bit_or(d1, d2);
   }
 };
 
 REGISTER_PRIMITIVE(bit_or);
 
-class bit_and : public ActionPrimitive<Field &, const Data &, const Data &> {
-  void operator ()(Field &f, const Data &d1, const Data &d2) {
+class bit_and : public ActionPrimitive<Data &, const Data &, const Data &> {
+  void operator ()(Data &f, const Data &d1, const Data &d2) {
     f.bit_and(d1, d2);
   }
 };
@@ -113,8 +115,8 @@ class bit_and : public ActionPrimitive<Field &, const Data &, const Data &> {
 REGISTER_PRIMITIVE(bit_and);
 
 class shift_left :
-  public ActionPrimitive<Field &, const Data &, const Data &> {
-  void operator ()(Field &f, const Data &d1, const Data &d2) {
+  public ActionPrimitive<Data &, const Data &, const Data &> {
+  void operator ()(Data &f, const Data &d1, const Data &d2) {
     f.shift_left(d1, d2);
   }
 };
@@ -122,8 +124,8 @@ class shift_left :
 REGISTER_PRIMITIVE(shift_left);
 
 class shift_right :
-  public ActionPrimitive<Field &, const Data &, const Data &> {
-  void operator ()(Field &f, const Data &d1, const Data &d2) {
+  public ActionPrimitive<Data &, const Data &, const Data &> {
+  void operator ()(Data &f, const Data &d1, const Data &d2) {
     f.shift_right(d1, d2);
   }
 };
@@ -141,9 +143,18 @@ class drop : public ActionPrimitive<> {
 
 REGISTER_PRIMITIVE(drop);
 
+class exit_ : public ActionPrimitive<> {
+  void operator ()() {
+    get_packet().mark_for_exit();
+  }
+};
+
+REGISTER_PRIMITIVE_W_NAME("exit", exit_);
+
 class generate_digest : public ActionPrimitive<const Data &, const Data &> {
   void operator ()(const Data &receiver, const Data &learn_id) {
     // discared receiver for now
+    (void) receiver;
     get_field("intrinsic_metadata.lf_field_list").set(learn_id);
   }
 };
@@ -156,6 +167,9 @@ class add_header : public ActionPrimitive<Header &> {
     if (!hdr.is_valid()) {
       hdr.reset();
       hdr.mark_valid();
+      // updated the length packet register (register 0)
+      auto &packet = get_packet();
+      packet.set_register(0, packet.get_register(0) + hdr.get_nbytes_packet());
     }
   }
 };
@@ -172,7 +186,12 @@ REGISTER_PRIMITIVE(add_header_fast);
 
 class remove_header : public ActionPrimitive<Header &> {
   void operator ()(Header &hdr) {
-    hdr.mark_invalid();
+    if (hdr.is_valid()) {
+      // updated the length packet register (register 0)
+      auto &packet = get_packet();
+      packet.set_register(0, packet.get_register(0) - hdr.get_nbytes_packet());
+      hdr.mark_invalid();
+    }
   }
 };
 
@@ -180,7 +199,10 @@ REGISTER_PRIMITIVE(remove_header);
 
 class copy_header : public ActionPrimitive<Header &, const Header &> {
   void operator ()(Header &dst, const Header &src) {
-    if (!src.is_valid()) return;
+    if (!src.is_valid()) {
+      dst.mark_invalid();
+      return;
+    }
     dst.mark_valid();
     assert(dst.get_header_type_id() == src.get_header_type_id());
     for (unsigned int i = 0; i < dst.size(); i++) {
@@ -238,9 +260,9 @@ class recirculate : public ActionPrimitive<const Data &> {
 REGISTER_PRIMITIVE(recirculate);
 
 class modify_field_with_hash_based_offset
-  : public ActionPrimitive<Field &, const Data &,
+  : public ActionPrimitive<Data &, const Data &,
                            const NamedCalculation &, const Data &> {
-  void operator ()(Field &dst, const Data &base,
+  void operator ()(Data &dst, const Data &base,
                    const NamedCalculation &hash, const Data &size) {
     uint64_t v =
       (hash.output(get_packet()) % size.get<uint64_t>()) + base.get<uint64_t>();
@@ -317,11 +339,11 @@ REGISTER_PRIMITIVE(pop);
 //   from /usr/include/boost/cstdint.hpp:36,
 //   from /usr/include/boost/multiprecision/number.hpp:9,
 //   from /usr/include/boost/multiprecision/gmp.hpp:9,
-//   from ../../modules/bm_sim/include/bm_sim/bignum.h:25,
-//   from ../../modules/bm_sim/include/bm_sim/data.h:32,
-//   from ../../modules/bm_sim/include/bm_sim/fields.h:28,
-//   from ../../modules/bm_sim/include/bm_sim/phv.h:34,
-//   from ../../modules/bm_sim/include/bm_sim/actions.h:34,
+//   from ../../src/bm_sim/include/bm_sim/bignum.h:25,
+//   from ../../src/bm_sim/include/bm_sim/data.h:32,
+//   from ../../src/bm_sim/include/bm_sim/fields.h:28,
+//   from ../../src/bm_sim/include/bm_sim/phv.h:34,
+//   from ../../src/bm_sim/include/bm_sim/actions.h:34,
 //   from primitives.cpp:21:
 //     /usr/include/unistd.h:993:12: note: declared here
 //     extern int truncate (const char *__file, __off_t __length)
@@ -338,4 +360,6 @@ REGISTER_PRIMITIVE_W_NAME("truncate", truncate_);
 // the previous alternative was to have all the primitives in a header file (the
 // primitives could also be placed in simple_switch.cpp directly), but I need
 // this dummy function if I want to keep the primitives in their own file
-int import_primitives() { }
+int import_primitives() {
+  return 0;
+}

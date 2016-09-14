@@ -20,25 +20,43 @@
 
 /* Switch instance */
 
+#include <bm/SimpleSwitch.h>
+#include <bm/bm_runtime/bm_runtime.h>
+#include <bm/bm_sim/target_parser.h>
+
 #include "simple_switch.h"
 
-#include "bm_runtime/bm_runtime.h"
+namespace {
+SimpleSwitch *simple_switch;
+bm::TargetParserBasic *simple_switch_parser;
+}  // namespace
 
-#include "SimpleSwitch_server.ipp"
-
-static SimpleSwitch *simple_switch;
+namespace sswitch_runtime {
+shared_ptr<SimpleSwitchIf> get_handler(SimpleSwitch *sw);
+}  // namespace sswitch_runtime
 
 int
 main(int argc, char* argv[]) {
   simple_switch = new SimpleSwitch();
-  int status = simple_switch->init_from_command_line_options(argc, argv);
+  simple_switch_parser = new bm::TargetParserBasic();
+  simple_switch_parser->add_flag_option("enable-swap",
+                                        "enable JSON swapping at runtime");
+  int status = simple_switch->init_from_command_line_options(
+      argc, argv, simple_switch_parser);
   if (status != 0) std::exit(status);
+
+  bool enable_swap_flag = false;
+  if (simple_switch_parser->get_flag_option("enable-swap", &enable_swap_flag)
+      != bm::TargetParserBasic::ReturnCode::SUCCESS)
+    std::exit(1);
+  if (enable_swap_flag) simple_switch->enable_config_swap();
 
   int thrift_port = simple_switch->get_runtime_port();
   bm_runtime::start_server(simple_switch, thrift_port);
-  // 3rd template argument could just as well be SimpleSwitch
-  bm_runtime::add_service<SimpleSwitchHandler, SimpleSwitchProcessor, Switch>(
-    "simple_switch");
+  using ::sswitch_runtime::SimpleSwitchIf;
+  using ::sswitch_runtime::SimpleSwitchProcessor;
+  bm_runtime::add_service<SimpleSwitchIf, SimpleSwitchProcessor>(
+      "simple_switch", sswitch_runtime::get_handler(simple_switch));
   simple_switch->start_and_return();
 
   while (true) std::this_thread::sleep_for(std::chrono::seconds(100));

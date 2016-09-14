@@ -20,44 +20,17 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
 #include <sstream>
 #include <string>
 
-#include "bm_sim/P4Objects.h"
+#include <boost/filesystem.hpp>
+
+#include <bm/bm_sim/P4Objects.h>
 
 using namespace bm;
 
-class modify_field : public ActionPrimitive<Field &, const Data &> {
-  void operator ()(Field &f, const Data &d) {
-    f.set(d);
-  }
-};
-
-REGISTER_PRIMITIVE(modify_field);
-
-class drop : public ActionPrimitive<> {
-  void operator ()() {
-
-  }
-};
-
-REGISTER_PRIMITIVE(drop);
-
-class add_to_field : public ActionPrimitive<Field &, const Data &> {
-  void operator ()(Field &f, const Data &d) {
-    f.add(f, d);
-  }
-};
-
-REGISTER_PRIMITIVE(add_to_field);
-
-class generate_digest : public ActionPrimitive<const Data &, const Data &> {
-  void operator ()(const Data &receiver, const Data &learn_id) {
-    // stub only
-  }
-};
-
-REGISTER_PRIMITIVE(generate_digest);
+namespace fs = boost::filesystem;
 
 /* I need to find a better way to test the json parser, maybe I could simply
    read from the target files... */
@@ -71,17 +44,18 @@ const std::string JSON_TEST_STRING_2 =
 TEST(P4Objects, LoadFromJSON1) {
   std::istringstream is(JSON_TEST_STRING_1);
   P4Objects objects;
-  ASSERT_EQ(0, objects.init_objects(&is));
+  LookupStructureFactory factory;
+  ASSERT_EQ(0, objects.init_objects(&is, &factory));
 
   ASSERT_NE(nullptr, objects.get_pipeline("ingress"));
-  ASSERT_NE(nullptr, objects.get_action("_drop"));
+  ASSERT_NE(nullptr, objects.get_action("ipv4_lpm", "_drop"));
   ASSERT_NE(nullptr, objects.get_parser("parser"));
   ASSERT_NE(nullptr, objects.get_deparser("deparser"));
   MatchTableAbstract *table;
-  table = objects.get_abstract_match_table("forward"); 
+  table = objects.get_abstract_match_table("forward");
   ASSERT_NE(nullptr, table);
   ASSERT_NE(nullptr, dynamic_cast<MatchTable *>(table));
-  table = objects.get_abstract_match_table("ipv4_lpm"); 
+  table = objects.get_abstract_match_table("ipv4_lpm");
   ASSERT_NE(nullptr, table);
   ASSERT_NE(nullptr, dynamic_cast<MatchTable *>(table));
   ASSERT_NE(nullptr, objects.get_match_action_table("forward"));
@@ -94,7 +68,8 @@ TEST(P4Objects, LoadFromJSON1) {
 TEST(P4Objects, LoadFromJSON2) {
   std::istringstream is(JSON_TEST_STRING_2);
   P4Objects objects;
-  ASSERT_EQ(0, objects.init_objects(&is));
+  LookupStructureFactory factory;
+  ASSERT_EQ(0, objects.init_objects(&is, &factory));
 
   // this second test just checks that learn lists and indirect tables get
   // parsed correctly
@@ -111,42 +86,47 @@ TEST(P4Objects, LoadFromJSON2) {
 TEST(P4Objects, Empty) {
   std::istringstream is("{}");
   P4Objects objects;
-  ASSERT_EQ(0, objects.init_objects(&is));
+  LookupStructureFactory factory;
+  ASSERT_EQ(0, objects.init_objects(&is, &factory));
 }
 
 TEST(P4Objects, UnknownPrimitive) {
   std::istringstream is("{\"actions\":[{\"name\":\"_drop\",\"id\":2,\"runtime_data\":[],\"primitives\":[{\"op\":\"bad_primitive\",\"parameters\":[]}]}]}");
   std::stringstream os;
   P4Objects objects(os);
+  LookupStructureFactory factory;
   std::string expected("Unknown primitive action: bad_primitive\n");
-  ASSERT_NE(0, objects.init_objects(&is));
+  ASSERT_NE(0, objects.init_objects(&is, &factory));
   EXPECT_EQ(expected, os.str());
 }
 
 TEST(P4Objects, PrimitiveBadParamCount) {
   std::istringstream is("{\"actions\":[{\"name\":\"_drop\",\"id\":2,\"runtime_data\":[],\"primitives\":[{\"op\":\"drop\",\"parameters\":[{\"type\":\"hexstr\",\"value\":\"0xab\"}]}]}]}");
   std::stringstream os;
+  LookupStructureFactory factory;
   P4Objects objects(os);
   std::string expected("Invalid number of parameters for primitive action drop: expected 0 but got 1\n");
-  ASSERT_NE(0, objects.init_objects(&is));
+  ASSERT_NE(0, objects.init_objects(&is, &factory));
   EXPECT_EQ(expected, os.str());
 }
 
 TEST(P4Objects, UnknownHash) {
   std::istringstream is("{\"calculations\":[{\"name\":\"calc\",\"id\":0,\"input\":[],\"algo\":\"bad_hash_1\"}]}");
   std::stringstream os;
+  LookupStructureFactory factory;
   P4Objects objects(os);
   std::string expected("Unknown hash algorithm: bad_hash_1\n");
-  ASSERT_NE(0, objects.init_objects(&is));
+  ASSERT_NE(0, objects.init_objects(&is, &factory));
   EXPECT_EQ(expected, os.str());
 }
 
 TEST(P4Objects, UnknownHashSelector) {
   std::istringstream is("{\"pipelines\":[{\"name\":\"ingress\",\"id\":0,\"init_table\":\"t1\",\"tables\":[{\"name\":\"t1\",\"id\":0,\"match_type\":\"exact\",\"type\":\"indirect_ws\",\"selector\":{\"algo\":\"bad_hash_2\",\"input\":[]},\"max_size\":1024,\"with_counters\":false,\"key\":[],\"actions\":[\"_drop\"],\"next_tables\":{\"_drop\":null},\"default_action\":null}]}]}");
   std::stringstream os;
+  LookupStructureFactory factory;
   P4Objects objects(os);
   std::string expected("Unknown hash algorithm: bad_hash_2\n");
-  ASSERT_NE(0, objects.init_objects(&is));
+  ASSERT_NE(0, objects.init_objects(&is, &factory));
   EXPECT_EQ(expected, os.str());
 }
 
@@ -155,9 +135,156 @@ TEST(P4Objects, RequiredField) {
   std::set<P4Objects::header_field_pair> required_fields;
   required_fields.insert(std::make_pair("standard_metadata", "egress_port"));
   std::stringstream os;
+  LookupStructureFactory factory;
   P4Objects objects(os);
   std::string expected("Field standard_metadata.egress_port is required by switch target but is not defined\n");
   // 0 for device_id, 0 for cxt_id, nullptr for transport
-  ASSERT_NE(0, objects.init_objects(&is, 0, 0, nullptr, required_fields));
+  ASSERT_NE(0, objects.init_objects(&is, &factory, 0, 0, nullptr, required_fields));
   EXPECT_EQ(expected, os.str());
+}
+
+TEST(P4Objects, FieldAlias) {
+  std::istringstream is("{\"header_types\":[{\"name\":\"hdrA_t\",\"id\":0,\"fields\":[[\"f1\",8],[\"f2\",8]]}],\"headers\":[{\"name\":\"hdrA\",\"id\":0,\"header_type\":\"hdrA_t\"}],\"field_aliases\":[[\"this_is.my_alias\",[\"hdrA\",\"f1\"]]]}");
+  P4Objects objects;
+  LookupStructureFactory factory;
+  ASSERT_EQ(0, objects.init_objects(&is, &factory));
+
+  ASSERT_TRUE(objects.field_exists("hdrA", "f1"));
+  ASSERT_TRUE(objects.field_exists("this_is", "my_alias"));
+
+  ASSERT_FALSE(objects.field_exists("hdrA", "fbad"));
+  ASSERT_FALSE(objects.field_exists("hdrBad", "f1"));
+  ASSERT_FALSE(objects.field_exists("this_is_not", "my_alias"));
+  ASSERT_FALSE(objects.field_exists("this_is", "not_my_alias"));
+}
+
+TEST(P4Objects, Reset) {
+  std::istringstream is(JSON_TEST_STRING_1);
+  P4Objects objects;
+  LookupStructureFactory factory;
+  ASSERT_EQ(0, objects.init_objects(&is, &factory));
+  // TODO(antonin): this test is not doing anything useful, but it is pretty
+  // hard to test for reset
+  objects.reset_state();
+}
+
+class my_extern_type : public ExternType {
+ public:
+  BM_EXTERN_ATTRIBUTES {
+    BM_EXTERN_ATTRIBUTE_ADD(attr1);
+  }
+
+  void methodA() { }
+
+  void init() override { }
+
+ private:
+  Data attr1{0};
+};
+
+BM_REGISTER_EXTERN(my_extern_type);
+BM_REGISTER_EXTERN_METHOD(my_extern_type, methodA);
+
+namespace {
+
+void create_extern_instance_json(std::ostream *ss,
+                                 const std::string &instance_name,
+                                 const std::string &type_name,
+                                 const std::string &attr_name,
+                                 const std::string &attr_type) {
+  *ss << "{\"extern_instances\":[{\"name\":\""
+      << instance_name
+      << "\",\"id\":22,\"type\":\""
+      << type_name
+      << "\",\"attribute_values\":[{\"name\":\""
+      << attr_name
+      << "\",\"type\":\""
+      << attr_type
+      << "\",\"value\":\"0xab\"}]}]}";
+}
+
+}  // namespace
+
+TEST(P4Objects, ExternInstanceDeclaration) {
+  std::stringstream is;
+
+  {
+    std::stringstream os;
+    P4Objects objects(os);
+    LookupStructureFactory factory;
+    create_extern_instance_json(&is, "my_extern_instance", "my_extern_type",
+                                "attr1", "hexstr");
+    ASSERT_EQ(0, objects.init_objects(&is, &factory));
+  }
+
+  {
+    std::stringstream os;
+    P4Objects objects(os);
+    LookupStructureFactory factory;
+    create_extern_instance_json(&is, "my_extern_instance", "bad_type",
+                                "attr1", "hexstr");
+    std::string expected_error_msg = "Invalid reference to extern type 'bad_type'\n";
+    ASSERT_NE(0, objects.init_objects(&is, &factory));
+    EXPECT_EQ(expected_error_msg, os.str());
+  }
+
+  {
+    std::stringstream os;
+    P4Objects objects(os);
+    LookupStructureFactory factory;
+    create_extern_instance_json(&is, "my_extern_instance", "my_extern_type",
+                                "bad_attr", "hexstr");
+    std::string expected_error_msg = "Extern type 'my_extern_type' has no attribute 'bad_attr'\n";
+    ASSERT_NE(0, objects.init_objects(&is, &factory));
+    EXPECT_EQ(expected_error_msg, os.str());
+  }
+
+  {
+    std::stringstream os;
+    P4Objects objects(os);
+    LookupStructureFactory factory;
+    create_extern_instance_json(&is, "my_extern_instance", "my_extern_type",
+                                "attr1", "unsupported_type");
+    std::string expected_error_msg = "Only attributes of type 'hexstr' are supported for extern instance attribute initialization\n";
+    ASSERT_NE(0, objects.init_objects(&is, &factory));
+    EXPECT_EQ(expected_error_msg, os.str());
+  }
+}
+
+TEST(P4Objects, TableDefaultEntry) {
+  std::stringstream is;
+  is << "{\"pipelines\":[{\"name\":\"ingress\",\"id\":0,\"init_table\":\"t0\","
+     << "\"tables\":[{\"name\":\"t0\",\"id\":0,\"match_type\":\"exact\","
+     << "\"type\":\"simple\",\"max_size\":1,\"with_counters\":false,"
+     << "\"key\":[],\"action_ids\":[0],\"next_tables\":{\"a0\":null},"
+     << "\"default_entry\":{\"action_id\":0,\"action_const\":true,"
+     << "\"action_data\":[\"0xab\"],\"action_entry_const\":true}}]}],"
+     << "\"actions\":[{\"name\":\"a0\",\"id\":0,\"runtime_data\":"
+     << "[{\"name\":\"p\",\"bitwidth\":32}],\"primitives\":[]}]}";
+  P4Objects objects;
+  LookupStructureFactory factory;
+  ASSERT_EQ(0, objects.init_objects(&is, &factory));
+  auto t_ = objects.get_abstract_match_table("t0");
+  auto t = dynamic_cast<MatchTable *>(t_);
+  ASSERT_NE(nullptr, t);
+  MatchTable::Entry entry;
+  auto rc = t->get_default_entry(&entry);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+  ASSERT_EQ("a0", entry.action_fn->get_name());
+  ASSERT_EQ(1u, entry.action_data.size());
+  ASSERT_EQ(0xab, entry.action_data.get(0).get_int());
+}
+
+TEST(P4Objects, ParseVset) {
+  fs::path json_path = fs::path(TESTDATADIR) / fs::path("parse_vset.json");
+  std::ifstream is(json_path.string());
+  P4Objects objects;
+  LookupStructureFactory factory;
+  ASSERT_EQ(0, objects.init_objects(&is, &factory));
+  auto parse_vset_1 = objects.get_parse_vset("pv1");
+  ASSERT_NE(nullptr, parse_vset_1);
+  auto parse_vset_2 = objects.get_parse_vset("pv2");
+  ASSERT_NE(nullptr, parse_vset_2);
+  ASSERT_EQ("pv1", parse_vset_1->get_name());
+  ASSERT_EQ(16, parse_vset_1->get_compressed_bitwidth());
 }

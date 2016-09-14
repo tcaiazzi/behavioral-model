@@ -21,7 +21,7 @@
 namespace cpp bm_runtime.standard
 namespace py bm_runtime.standard
 
-typedef i64 BmEntryHandle
+typedef i32 BmEntryHandle
 typedef list<binary> BmActionData
 
 typedef i32 BmMemberHandle
@@ -35,7 +35,8 @@ enum BmMatchParamType {
   EXACT = 0,
   LPM = 1,
   TERNARY = 2,
-  VALID = 3
+  VALID = 3,
+  RANGE = 4
 }
 
 struct BmMatchParamExact {
@@ -56,13 +57,20 @@ struct BmMatchParamValid {
   1:bool key
 }
 
+# end is a keyword in Thrift
+struct BmMatchParamRange {
+  1:binary start,
+  2:binary end_
+}
+
 # Thrift union sucks in C++, the following is much better
 struct BmMatchParam {
   1:BmMatchParamType type,
   2:optional BmMatchParamExact exact,
   3:optional BmMatchParamLPM lpm,
   4:optional BmMatchParamTernary ternary,
-  5:optional BmMatchParamValid valid
+  5:optional BmMatchParamValid valid,
+  6:optional BmMatchParamRange range
 }
 
 typedef list<BmMatchParam> BmMatchParams
@@ -101,7 +109,10 @@ enum TableOperationErrorCode {
   DUPLICATE_ENTRY = 17,
   BAD_MATCH_KEY = 18,
   INVALID_METER_OPERATION = 19,
-  ERROR = 20,
+  DEFAULT_ACTION_IS_CONST = 20,
+  DEFAULT_ENTRY_IS_CONST = 21,
+  NO_DEFAULT_ENTRY = 22,
+  ERROR = 23,
 }
 
 exception InvalidTableOperation {
@@ -129,11 +140,12 @@ exception InvalidSwapOperation {
 }
 
 enum MeterOperationErrorCode {
-  INVALID_INDEX = 1,
-  BAD_RATES_LIST = 2,
-  INVALID_INFO_RATE_VALUE = 3,
-  INVALID_BURST_SIZE_VALUE = 4,
-  ERROR = 5
+  INVALID_METER_NAME = 1,
+  INVALID_INDEX = 2,
+  BAD_RATES_LIST = 3,
+  INVALID_INFO_RATE_VALUE = 4,
+  INVALID_BURST_SIZE_VALUE = 5,
+  ERROR = 6
 }
 
 exception InvalidMeterOperation {
@@ -143,12 +155,24 @@ exception InvalidMeterOperation {
 typedef i64 BmRegisterValue
 
 enum RegisterOperationErrorCode {
-  INVALID_INDEX = 1,
-  ERROR = 2
+  INVALID_REGISTER_NAME = 1,
+  INVALID_INDEX = 2,
+  ERROR = 3
 }
 
 exception InvalidRegisterOperation {
  1:RegisterOperationErrorCode code
+}
+
+typedef binary BmParseVSetValue
+
+enum ParseVSetOperationErrorCode {
+  INVALID_PARSE_VSET_NAME = 1,
+  ERROR = 2
+}
+
+exception InvalidParseVSetOperation {
+ 1:ParseVSetOperationErrorCode code
 }
 
 enum LearnOperationErrorCode {
@@ -167,6 +191,80 @@ enum DevMgrErrorCode {
 
 exception InvalidDevMgrOperation {
  1:DevMgrErrorCode code
+}
+
+struct DevMgrPortInfo {
+  1:i32 port_num;
+  2:string iface_name;
+  3:bool is_up;
+  4:map<string, string> extra;
+}
+
+struct BmCrc16Config {
+  1:i16 polynomial;
+  2:i16 initial_remainder;
+  3:i16 final_xor_value;
+  4:bool data_reflected;
+  5:bool remainder_reflected;
+}
+
+struct BmCrc32Config {
+  1:i32 polynomial;
+  2:i32 initial_remainder;
+  3:i32 final_xor_value;
+  4:bool data_reflected;
+  5:bool remainder_reflected;
+}
+
+enum CrcErrorCode {
+  INVALID_CALCULATION_NAME = 1,
+  WRONG_TYPE_CALCULATION = 2,
+  INVALID_CONFIG = 3
+}
+
+exception InvalidCrcOperation {
+ 1:CrcErrorCode code
+}
+
+enum BmActionEntryType {
+  NONE = 0,  // used when querying default entry, if none configured
+  ACTION_DATA = 1,
+  MBR_HANDLE = 2,
+  GRP_HANDLE = 3
+}
+
+struct BmActionEntry {
+ 1:BmActionEntryType action_type,
+ 2:optional string action_name,
+ 3:optional BmActionData action_data,
+ 4:optional BmMemberHandle mbr_handle,
+ 5:optional BmGroupHandle grp_handle
+}
+
+struct BmMtEntry {
+ 1:BmMatchParams match_key,
+ 2:BmAddEntryOptions options,
+ 3:BmEntryHandle entry_handle,
+ 4:BmActionEntry action_entry
+}
+
+struct BmMtIndirectMember {
+ 1:BmMemberHandle mbr_handle,
+ 2:string action_name,
+ 3:BmActionData action_data
+}
+
+struct BmMtIndirectWsGroup {
+ 1:BmGroupHandle grp_handle,
+ 2:list<BmMemberHandle> mbr_handles
+}
+
+struct BmConfig {
+ 1:i32 device_id,
+ 2:i32 thrift_port,
+ 3:optional string notifications_socket,
+ 4:optional string elogger_socket,
+ 5:optional string debugger_socket
 }
 
 service Standard {
@@ -340,6 +438,50 @@ service Standard {
     4:list<BmMeterRateConfig> rates
   ) throws (1:InvalidTableOperation ouch),
 
+  list<BmMeterRateConfig> bm_mt_get_meter_rates(
+    1:i32 cxt_id,
+    2:string table_name,
+    3:BmEntryHandle entry_handle
+  ) throws (1:InvalidTableOperation ouch),
+
+  list<BmMtEntry> bm_mt_get_entries(
+    1:i32 cxt_id,
+    2:string table_name
+  ) throws (1:InvalidTableOperation ouch),
+
+  BmMtEntry bm_mt_get_entry(
+    1:i32 cxt_id,
+    2:string table_name,
+    3:BmEntryHandle entry_handle
+  ) throws (1:InvalidTableOperation ouch),
+
+  BmActionEntry bm_mt_get_default_entry(
+    1:i32 cxt_id,
+    2:string table_name
+  ) throws (1:InvalidTableOperation ouch),
+
+  list<BmMtIndirectMember> bm_mt_indirect_get_members(
+    1:i32 cxt_id,
+    2:string table_name
+  ) throws (1:InvalidTableOperation ouch),
+
+  BmMtIndirectMember bm_mt_indirect_get_member(
+    1:i32 cxt_id,
+    2:string table_name,
+    3:BmMemberHandle mbr_handle
+  ) throws (1:InvalidTableOperation ouch),
+
+  list<BmMtIndirectWsGroup> bm_mt_indirect_ws_get_groups(
+    1:i32 cxt_id,
+    2:string table_name
+  ) throws (1:InvalidTableOperation ouch),
+
+  BmMtIndirectWsGroup bm_mt_indirect_ws_get_group(
+    1:i32 cxt_id,
+    2:string table_name,
+    3:BmGroupHandle grp_handle
+  ) throws (1:InvalidTableOperation ouch),
+
   // indirect counters
 
   BmCounterValue bm_counter_read(
@@ -410,6 +552,12 @@ service Standard {
     4:list<BmMeterRateConfig> rates
   ) throws (1:InvalidMeterOperation ouch)
 
+  list<BmMeterRateConfig> bm_meter_get_rates(
+    1:i32 cxt_id,
+    2:string meter_array_name,
+    3:i32 index
+  ) throws (1:InvalidMeterOperation ouch)
+
 
   // registers
 
@@ -426,6 +574,33 @@ service Standard {
     4:BmRegisterValue value
   ) throws (1:InvalidRegisterOperation ouch)
 
+  void bm_register_write_range(
+    1:i32 cxt_id,
+    2:string register_array_name,
+    3:i32 start_index,
+    4:i32 end_index,
+    5:BmRegisterValue value
+  ) throws (1:InvalidRegisterOperation ouch)
+
+  void bm_register_reset(
+    1:i32 cxt_id,
+    2:string register_array_name
+  ) throws (1:InvalidRegisterOperation ouch)
+
+  // parse value sets
+
+  void bm_parse_vset_add(
+    1:i32 cxt_id,
+    2:string parse_vset_name,
+    3:BmParseVSetValue value
+  ) throws (1:InvalidParseVSetOperation ouch)
+
+  void bm_parse_vset_remove(
+    1:i32 cxt_id,
+    2:string parse_vset_name,
+    3:BmParseVSetValue value
+  ) throws (1:InvalidParseVSetOperation ouch)
+
 
   // device manager
 
@@ -439,12 +614,29 @@ service Standard {
     1:i32 port_num
   ) throws (1:InvalidDevMgrOperation ouch)
 
-  // debug functions
+  list<DevMgrPortInfo> bm_dev_mgr_show_ports(
+  ) throws (1:InvalidDevMgrOperation ouch)
 
-  string bm_dump_table(
+  // bmv2 management functions
+
+  BmConfig bm_mgmt_get_info()
+
+  void bm_set_crc16_custom_parameters(
     1:i32 cxt_id,
-    2:string table_name
-  )
+    2:string calc_name,
+    3:BmCrc16Config crc16_config
+  ) throws (1:InvalidCrcOperation ouch)
+
+  void bm_set_crc32_custom_parameters(
+    1:i32 cxt_id,
+    2:string calc_name,
+    3:BmCrc32Config crc32_config
+  ) throws (1:InvalidCrcOperation ouch)
 
   void bm_reset_state()
+
+  string bm_get_config()
+  string bm_get_config_md5()
+
+  string bm_serialize_state()
 }

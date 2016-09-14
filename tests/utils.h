@@ -21,7 +21,10 @@
 #ifndef TESTS_UTILS_H_
 #define TESTS_UTILS_H_
 
-#include "bm_sim/transport.h"
+#include <mutex>
+#include <condition_variable>
+
+#include <bm/bm_sim/transport.h>
 
 class MemoryAccessor : public bm::TransportIface {
  public:
@@ -109,4 +112,17 @@ class MemoryAccessor : public bm::TransportIface {
   mutable std::condition_variable can_read;
 };
 
-#endif  // TEST_UTILS_H_
+class CLIWrapperImp;
+
+class CLIWrapper {
+ public:
+  CLIWrapper(int thrift_port, bool silent = false);
+  ~CLIWrapper();
+
+  void send_cmd(const std::string &cmd);
+
+ private:
+  std::unique_ptr<CLIWrapperImp> imp;
+};
+
+#endif  // TESTS_UTILS_H_

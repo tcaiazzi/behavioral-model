@@ -19,14 +19,13 @@
  */
 
 #include <gtest/gtest.h>
-#include "bm_sim/simple_pre.h"
-#include "bm_sim/simple_pre_lag.h"
+#include <bm/bm_sim/simple_pre.h>
+#include <bm/bm_sim/simple_pre_lag.h>
 #include <bitset>
 
 using namespace bm;
 
-TEST(McSimplePre, Replicate)
-{
+TEST(McSimplePre, Replicate) {
   McSimplePre pre;
   McSimplePre::mgrp_t mgid = 0x400;
   McSimplePre::mgrp_hdl_t mgrp_hdl;
@@ -38,7 +37,7 @@ TEST(McSimplePre, Replicate)
   McSimplePre::McIn ingress_info;
   std::vector<McSimplePre::McOut> egress_info;
   unsigned int count = 0;
-  unsigned int nodes = 3;
+  constexpr size_t nodes = 3;
 
   rc = pre.mc_mgrp_create(mgid, &mgrp_hdl);
   ASSERT_EQ(rc, McSimplePre::SUCCESS);
@@ -135,8 +134,7 @@ TEST(McSimplePre, Replicate)
 }
 
 
-TEST(McSimplePreLAG, Replicate)
-{
+TEST(McSimplePreLAG, Replicate) {
   McSimplePreLAG pre;
   McSimplePre::mgrp_t mgid = 0x400;
   McSimplePre::mgrp_hdl_t mgrp_hdl;
@@ -155,7 +153,7 @@ TEST(McSimplePreLAG, Replicate)
   std::vector<McSimplePre::McOut> egress_info;
   unsigned int count = 0;
   unsigned int member_count = 0;
-  unsigned int nodes = 3;
+  constexpr unsigned int nodes = 3;
 
   rc = pre.mc_mgrp_create(mgid, &mgrp_hdl);
   ASSERT_EQ(rc, McSimplePre::SUCCESS);
@@ -333,4 +331,32 @@ TEST(McSimplePreLAG, Replicate)
   }
   rc = pre.mc_mgrp_destroy(mgrp_hdl);
   ASSERT_EQ(rc, McSimplePre::SUCCESS);
+}
+
+TEST(McSimplePreLAG, ResetState) {
+  McSimplePreLAG pre;
+  McSimplePreLAG::mgrp_hdl_t mgrp;
+  McSimplePreLAG::l1_hdl_t l1h;
+  ASSERT_EQ(McSimplePre::SUCCESS, pre.mc_mgrp_create(1, &mgrp));
+  McSimplePreLAG::PortMap port_map;
+  port_map[1] = 1;
+  ASSERT_EQ(McSimplePre::SUCCESS, pre.mc_node_create(0, port_map, {}, &l1h));
+  ASSERT_EQ(McSimplePre::SUCCESS, pre.mc_node_associate(mgrp, l1h));
+  McSimplePreLAG::LagMap lag_map;
+  lag_map[2] = 1;
+  ASSERT_EQ(McSimplePre::SUCCESS, pre.mc_node_create(0, {}, lag_map, &l1h));
+  ASSERT_EQ(McSimplePre::SUCCESS, pre.mc_node_associate(mgrp, l1h));
+  ASSERT_EQ(McSimplePre::SUCCESS, pre.mc_set_lag_membership(2, port_map));
+
+  auto mc_out_1 = pre.replicate({1});
+  ASSERT_EQ(2u, mc_out_1.size());
+
+  // probably not the best test for reset
+  pre.reset_state();
+  auto mc_out_2 = pre.replicate({1});
+  ASSERT_EQ(0u, mc_out_2.size());
+
+  ASSERT_EQ(McSimplePre::SUCCESS, pre.mc_mgrp_create(1, &mgrp));
+  auto mc_out_3 = pre.replicate({1});
+  ASSERT_EQ(0u, mc_out_3.size());
 }

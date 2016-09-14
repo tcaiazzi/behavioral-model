@@ -18,15 +18,15 @@
  *
  */
 
+#include <bm/bm_sim/parser.h>
+#include <bm/bm_sim/tables.h>
+#include <bm/bm_sim/logger.h>
+
 #include <unistd.h>
 
 #include <iostream>
 #include <fstream>
 #include <string>
-
-#include "bm_sim/parser.h"
-#include "bm_sim/tables.h"
-#include "bm_sim/logger.h"
 
 #include "simple_switch.h"
 
@@ -49,22 +49,23 @@ struct hash_ex {
   }
 };
 
-REGISTER_HASH(hash_ex);
-
 struct bmv2_hash {
   uint64_t operator()(const char *buf, size_t s) const {
     return bm::hash::xxh64(buf, s);
   }
 };
 
-REGISTER_HASH(bmv2_hash);
-
 }  // namespace
+
+// if REGISTER_HASH calls placed in the anonymous namespace, some compiler can
+// give an unused variable warning
+REGISTER_HASH(hash_ex);
+REGISTER_HASH(bmv2_hash);
 
 extern int import_primitives();
 
-SimpleSwitch::SimpleSwitch(int max_port)
-  : Switch(false),  // enable_switch = false
+SimpleSwitch::SimpleSwitch(int max_port, bool enable_swap)
+  : Switch(enable_swap),
     max_port(max_port),
     input_buffer(1024),
 #ifdef SSWITCH_PRIORITY_QUEUEING_ON
@@ -85,12 +86,77 @@ SimpleSwitch::SimpleSwitch(int max_port)
   add_required_field("standard_metadata", "instance_type");
   add_required_field("standard_metadata", "egress_spec");
   add_required_field("standard_metadata", "clone_spec");
+  add_required_field("standard_metadata", "egress_port");
+
+  force_arith_field("standard_metadata", "ingress_port");
+  force_arith_field("standard_metadata", "packet_length");
+  force_arith_field("standard_metadata", "instance_type");
+  force_arith_field("standard_metadata", "egress_spec");
+  force_arith_field("standard_metadata", "clone_spec");
+
+  force_arith_field("queueing_metadata", "enq_timestamp");
+  force_arith_field("queueing_metadata", "enq_qdepth");
+  force_arith_field("queueing_metadata", "deq_timedelta");
+  force_arith_field("queueing_metadata", "deq_qdepth");
+
+  force_arith_field("intrinsic_metadata", "ingress_global_timestamp");
+  force_arith_field("intrinsic_metadata", "lf_field_list");
+  force_arith_field("intrinsic_metadata", "mcast_grp");
+  force_arith_field("intrinsic_metadata", "resubmit_flag");
+  force_arith_field("intrinsic_metadata", "egress_rid");
+  force_arith_field("intrinsic_metadata", "recirculate_flag");
 
   import_primitives();
 }
 
+#define PACKET_LENGTH_REG_IDX 0
+
+int
+SimpleSwitch::receive(int port_num, const char *buffer, int len) {
+  static int pkt_id = 0;
+
+  // this is a good place to call this, because blocking this thread will not
+  // block the processing of existing packet instances, which is a requirement
+  if (do_swap() == 0) {
+    check_queueing_metadata();
+  }
+
+  // we limit the packet buffer to original size + 512 bytes, which means we
+  // cannot add more than 512 bytes of header data to the packet, which should
+  // be more than enough
+  auto packet = new_packet_ptr(port_num, pkt_id++, len,
+                               bm::PacketBuffer(len + 512, buffer, len));
+
+  BMELOG(packet_in, *packet);
+
+  PHV *phv = packet->get_phv();
+  // many current P4 programs assume this
+  // it is also part of the original P4 spec
+  phv->reset_metadata();
+
+  // setting standard metadata
+
+  phv->get_field("standard_metadata.ingress_port").set(port_num);
+  // using packet register 0 to store length, this register will be updated for
+  // each add_header / remove_header primitive call
+  packet->set_register(PACKET_LENGTH_REG_IDX, len);
+  phv->get_field("standard_metadata.packet_length").set(len);
+  Field &f_instance_type = phv->get_field("standard_metadata.instance_type");
+  f_instance_type.set(PKT_INSTANCE_TYPE_NORMAL);
+
+  if (phv->has_field("intrinsic_metadata.ingress_global_timestamp")) {
+    phv->get_field("intrinsic_metadata.ingress_global_timestamp")
+        .set(get_ts().count());
+  }
+
+  input_buffer.push_front(std::move(packet));
+  return 0;
+}
+
 void
 SimpleSwitch::start_and_return() {
+  check_queueing_metadata();
+
   std::thread t1(&SimpleSwitch::ingress_thread, this);
   t1.detach();
   for (size_t i = 0; i < nb_egress_threads; i++) {
@@ -99,6 +165,40 @@ SimpleSwitch::start_and_return() {
   }
   std::thread t3(&SimpleSwitch::transmit_thread, this);
   t3.detach();
+}
+
+void
+SimpleSwitch::reset_target_state() {
+  bm::Logger::get()->debug("Resetting simple_switch target-specific state");
+  get_component<McSimplePreLAG>()->reset_state();
+}
+
+int
+SimpleSwitch::set_egress_queue_depth(int port, const size_t depth_pkts) {
+  egress_buffers.set_capacity(port, depth_pkts);
+  return 0;
+}
+
+int
+SimpleSwitch::set_all_egress_queue_depths(const size_t depth_pkts) {
+  for (int i = 0; i < max_port; i++) {
+    set_egress_queue_depth(i, depth_pkts);
+  }
+  return 0;
+}
+
+int
+SimpleSwitch::set_egress_queue_rate(int port, const uint64_t rate_pps) {
+  egress_buffers.set_rate(port, rate_pps);
+  return 0;
+}
+
+int
+SimpleSwitch::set_all_egress_queue_rates(const uint64_t rate_pps) {
+  for (int i = 0; i < max_port; i++) {
+    set_egress_queue_rate(i, rate_pps);
+  }
+  return 0;
 }
 
 void
@@ -125,7 +225,7 @@ SimpleSwitch::enqueue(int egress_port, std::unique_ptr<Packet> &&packet) {
 
     PHV *phv = packet->get_phv();
 
-    if (phv->has_header("queueing_metadata")) {
+    if (with_queueing_metadata) {
       phv->get_field("queueing_metadata.enq_timestamp").set(get_ts().count());
       phv->get_field("queueing_metadata.enq_qdepth")
           .set(egress_buffers.size(egress_port));
@@ -138,7 +238,9 @@ SimpleSwitch::enqueue(int egress_port, std::unique_ptr<Packet> &&packet) {
       bm::Logger::get()->error("Priority out of range, dropping packet");
       return;
     }
-    egress_buffers.push_front(egress_port, priority, std::move(packet));
+    egress_buffers.push_front(
+        egress_port, SSWITCH_PRIORITY_QUEUEING_NB_QUEUES - 1 - priority,
+        std::move(packet));
 #else
     egress_buffers.push_front(egress_port, std::move(packet));
 #endif
@@ -159,24 +261,40 @@ SimpleSwitch::copy_ingress_pkt(
         .set(phv->get_field(p.header, p.offset));
   }
   phv_copy->get_field("standard_metadata.instance_type").set(copy_type);
-  return std::move(packet_copy);
+  return packet_copy;
+}
+
+void
+SimpleSwitch::check_queueing_metadata() {
+  bool enq_timestamp_e = field_exists("queueing_metadata", "enq_timestamp");
+  bool enq_qdepth_e = field_exists("queueing_metadata", "enq_qdepth");
+  bool deq_timedelta_e = field_exists("queueing_metadata", "deq_timedelta");
+  bool deq_qdepth_e = field_exists("queueing_metadata", "deq_qdepth");
+  if (enq_timestamp_e || enq_qdepth_e || deq_timedelta_e || deq_qdepth_e) {
+    if (enq_timestamp_e && enq_qdepth_e && deq_timedelta_e && deq_qdepth_e)
+      with_queueing_metadata = true;
+    else
+      bm::Logger::get()->warn(
+          "Your JSON input defines some but not all queueing metadata fields");
+  }
 }
 
 void
 SimpleSwitch::ingress_thread() {
-  Parser *parser = this->get_parser("parser");
-  Pipeline *ingress_mau = this->get_pipeline("ingress");
-
   PHV *phv;
 
   while (1) {
     std::unique_ptr<Packet> packet;
     input_buffer.pop_back(&packet);
 
+    // TODO(antonin): only update these if swapping actually happened?
+    Parser *parser = this->get_parser("parser");
+    Pipeline *ingress_mau = this->get_pipeline("ingress");
+
     phv = packet->get_phv();
-    packet_id_t packet_id = packet->get_packet_id();
 
     int ingress_port = packet->get_ingress_port();
+    (void) ingress_port;
     BMLOG_DEBUG_PKT(*packet, "Processing packet received on port {}",
                     ingress_port);
 
@@ -192,6 +310,8 @@ SimpleSwitch::ingress_thread() {
 
     ingress_mau->apply(packet.get());
 
+    packet->reset_exit();
+
     Field &f_egress_spec = phv->get_field("standard_metadata.egress_spec");
     int egress_spec = f_egress_spec.get_int();
 
@@ -201,10 +321,14 @@ SimpleSwitch::ingress_thread() {
     int learn_id = 0;
     unsigned int mgid = 0u;
 
-    if (phv->has_header("intrinsic_metadata")) {
+    if (phv->has_field("intrinsic_metadata.lf_field_list")) {
       Field &f_learn_id = phv->get_field("intrinsic_metadata.lf_field_list");
       learn_id = f_learn_id.get_int();
+    }
 
+    // detect mcast support, if this is true we assume that other fields needed
+    // for mcast are also defined
+    if (phv->has_field("intrinsic_metadata.mcast_grp")) {
       Field &f_mgid = phv->get_field("intrinsic_metadata.mcast_grp");
       mgid = f_mgid.get_uint();
     }
@@ -264,6 +388,7 @@ SimpleSwitch::ingress_thread() {
       BMLOG_DEBUG_PKT(*packet, "Multicast requested for packet");
       Field &f_rid = phv->get_field("intrinsic_metadata.egress_rid");
       const auto pre_out = pre->replicate({mgid});
+      auto packet_size = packet->get_register(PACKET_LENGTH_REG_IDX);
       for (const auto &out : pre_out) {
         egress_port = out.egress_port;
         // if (ingress_port == egress_port) continue; // pruning
@@ -271,6 +396,7 @@ SimpleSwitch::ingress_thread() {
         f_rid.set(out.rid);
         f_instance_type.set(PKT_INSTANCE_TYPE_REPLICATION);
         std::unique_ptr<Packet> packet_copy = packet->clone_with_phv_ptr();
+        packet_copy->set_register(PACKET_LENGTH_REG_IDX, packet_size);
         enqueue(egress_port, std::move(packet_copy));
       }
       f_instance_type.set(instance_type);
@@ -293,8 +419,6 @@ SimpleSwitch::ingress_thread() {
 
 void
 SimpleSwitch::egress_thread(size_t worker_id) {
-  Deparser *deparser = this->get_deparser("deparser");
-  Pipeline *egress_mau = this->get_pipeline("egress");
   PHV *phv;
 
   while (1) {
@@ -302,19 +426,27 @@ SimpleSwitch::egress_thread(size_t worker_id) {
     size_t port;
     egress_buffers.pop_back(worker_id, &port, &packet);
 
-    phv = packet->get_phv();
-    packet_id_t packet_id = packet->get_packet_id();
+    Deparser *deparser = this->get_deparser("deparser");
+    Pipeline *egress_mau = this->get_pipeline("egress");
 
-    if (phv->has_header("queueing_metadata")) {
-      phv->get_field("queueing_metadata.deq_timestamp").set(get_ts().count());
-      phv->get_field("queueing_metadata.deq_qdepth")
-        .set(egress_buffers.size(port));
+    phv = packet->get_phv();
+
+    if (with_queueing_metadata) {
+      auto enq_timestamp =
+          phv->get_field("queueing_metadata.enq_timestamp").get<ts_res::rep>();
+      phv->get_field("queueing_metadata.deq_timedelta").set(
+          get_ts().count() - enq_timestamp);
+      phv->get_field("queueing_metadata.deq_qdepth").set(
+          egress_buffers.size(port));
     }
 
     phv->get_field("standard_metadata.egress_port").set(port);
 
     Field &f_egress_spec = phv->get_field("standard_metadata.egress_spec");
     f_egress_spec.set(0);
+
+    phv->get_field("standard_metadata.packet_length").set(
+        packet->get_register(PACKET_LENGTH_REG_IDX));
 
     egress_mau->apply(packet.get());
 
@@ -370,6 +502,9 @@ SimpleSwitch::egress_thread(size_t worker_id) {
         }
         phv_copy->get_field("standard_metadata.instance_type")
             .set(PKT_INSTANCE_TYPE_RECIRC);
+        size_t packet_size = packet_copy->get_data_size();
+        packet_copy->set_register(PACKET_LENGTH_REG_IDX, packet_size);
+        phv_copy->get_field("standard_metadata.packet_length").set(packet_size);
         input_buffer.push_front(std::move(packet_copy));
         continue;
       }
