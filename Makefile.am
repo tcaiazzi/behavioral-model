@@ -7,4 +7,4 @@ endif
 pkgconfigdir=$(libdir)/pkgconfig
 pkgconfig_DATA=$(builddir)/bmv2-libthrift.pc
 
-SUBDIRS = thrift_src third_party modules tests $(MAYBE_TARGETS)
+SUBDIRS = thrift_src third_party src include tests $(MAYBE_TARGETS) tools pdfixed

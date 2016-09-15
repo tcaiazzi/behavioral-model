@@ -72,15 +72,15 @@ libbmthrift_la_SOURCES = \
 	$(BUILT_SOURCES)
 
 include_HEADERS = \
-	gen-cpp/standard_constants.h \
-	gen-cpp/Standard.h \
-	gen-cpp/standard_types.h \
-	gen-cpp/simple_pre_constants.h \
-	gen-cpp/SimplePre.h \
-	gen-cpp/simple_pre_types.h \
-	gen-cpp/simple_pre_lag_constants.h \
-	gen-cpp/SimplePreLAG.h \
-	gen-cpp/simple_pre_lag_types.h
+	gen-cpp/bm/standard_constants.h \
+	gen-cpp/bm/Standard.h \
+	gen-cpp/bm/standard_types.h \
+	gen-cpp/bm/simple_pre_constants.h \
+	gen-cpp/bm/SimplePre.h \
+	gen-cpp/bm/simple_pre_types.h \
+	gen-cpp/bm/simple_pre_lag_constants.h \
+	gen-cpp/bm/SimplePreLAG.h \
+	gen-cpp/bm/simple_pre_lag_types.h
 
 # See http://www.gnu.org/software/automake/manual/html_node/Multiple-Outputs.html
 
