@@ -21,15 +21,23 @@
 #ifndef BM_BM_SIM_HANDLE_MGR_H_
 #define BM_BM_SIM_HANDLE_MGR_H_
 
+#include <bm/config.h>
+
 #include <algorithm>  // for swap
 #include <type_traits>
 #include <utility>
 
+#ifdef JUDY1_ON
 #include <Judy.h>
+#else
+#include <boost/dynamic_bitset.hpp>
+#endif
 
 namespace bm {
 
 using handle_t = uintptr_t;
+
+#ifdef JUDY1_ON
 
 class HandleMgr {
  public:
@@ -147,7 +155,7 @@ class HandleMgr {
 
   /* Move constructor */
   HandleMgr(HandleMgr&& other) noexcept
-  : handles(other.handles) {}
+    : handles(other.handles) {}
 
   ~HandleMgr() {
     clear();
@@ -263,6 +271,211 @@ class HandleMgr {
  private:
   Pvoid_t handles;
 };
+
+#else
+
+class HandleMgr {
+ public:
+  using bitset = boost::dynamic_bitset<>;
+  using size_type = bitset::size_type;
+  static constexpr size_type npos = bitset::npos;
+
+  // iterators: since they are very simple, I did not mind duplicating the
+  // code. Maybe it would be a good idea to condition the const'ness of the
+  // iterator with a boolean template, to unify the 2 iterators.
+
+  class const_iterator;
+
+  class iterator {
+    friend class const_iterator;
+
+   public:
+    iterator(HandleMgr *handle_mgr, handle_t index)
+      : handle_mgr(handle_mgr), index(index) {}
+
+    handle_t &operator*() {return index;}
+    handle_t *operator->() {return &index;}
+
+    bool operator==(const iterator &other) const {
+      return (handle_mgr == other.handle_mgr) && (index == other.index);
+    }
+
+    bool operator!=(const iterator &other) const {
+      return !(*this == other);
+    }
+
+    iterator& operator++() {
+      auto pos = static_cast<size_type>(index);
+      pos = handle_mgr->handles.find_next(pos);
+      if (pos == npos)
+        index = -1;
+      else
+        index = static_cast<handle_t>(pos);
+      return *this;
+    }
+
+    iterator operator++(int) {
+      // Use operator++()
+      const iterator old(*this);
+      ++(*this);
+      return old;
+    }
+
+   private:
+    HandleMgr *handle_mgr;
+    handle_t index;
+  };
+
+  class const_iterator {
+   public:
+    const_iterator(const HandleMgr *handle_mgr, handle_t index)
+      : handle_mgr(handle_mgr), index(index) {}
+
+    const_iterator(const iterator &other)  // NOLINT(runtime/explicit)
+      : handle_mgr(other.handle_mgr), index(other.index) {}
+
+    const handle_t &operator*() const {return index;}
+    const handle_t *operator->() const {return &index;}
+
+    const_iterator& operator=(const const_iterator &other) {
+      handle_mgr = other.handle_mgr;
+      index = other.index;
+      return *this;
+    }
+
+    bool operator==(const const_iterator &other) const {
+      return (handle_mgr == other.handle_mgr) && (index == other.index);
+    }
+
+    bool operator!=(const const_iterator &other) const {
+      return !(*this == other);
+    }
+
+    const const_iterator& operator++() {
+      auto pos = static_cast<size_type>(index);
+      pos = handle_mgr->handles.find_next(pos);
+      if (pos == npos)
+        index = -1;
+      else
+        index = static_cast<handle_t>(pos);
+      return *this;
+    }
+
+    const const_iterator operator++(int) {
+      // Use operator++()
+      const const_iterator old(*this);
+      ++(*this);
+      return old;
+    }
+
+   private:
+    const HandleMgr *handle_mgr;
+    handle_t index;
+  };
+
+
+ public:
+  bool operator==(const HandleMgr &other) const {
+    return (handles == other.handles);
+  }
+
+  bool operator!=(const HandleMgr &other) const {
+    return !(*this == other);
+  }
+
+  /* Return 0 on success, -1 on failure */
+
+  int get_handle(handle_t *handle) {
+    auto pos = first_unset;
+    *handle = static_cast<handle_t>(pos);
+    auto s = handles.size();
+    if (pos < s) {
+      handles.set(pos);
+      first_unset = get_first_unset(first_unset);
+    } else {
+      assert(pos == s);
+      first_unset++;
+      handles.push_back(true);
+    }
+    return 0;
+  }
+
+  int release_handle(handle_t handle) {
+    auto pos = static_cast<size_type>(handle);
+    auto s = handles.size();
+    if (pos >= s || !handles.test(pos)) return -1;
+    handles.reset(pos);
+    if (first_unset > pos) first_unset = pos;
+    return 0;
+  }
+
+  int set_handle(handle_t handle) {
+    auto pos = static_cast<size_type>(handle);
+    auto s = handles.size();
+    if (pos >= s)
+      handles.resize(pos + 1);
+    else if (handles.test(pos))
+      return -1;
+    handles.set(pos);
+    if (first_unset == pos) first_unset = get_first_unset(pos);
+    return 0;
+  }
+
+  size_t size() const {
+    return static_cast<size_t>(handles.count());
+  }
+
+  bool valid_handle(handle_t handle) const {
+    auto pos = static_cast<size_type>(handle);
+    auto s = handles.size();
+    if (pos >= s) return false;
+    return handles.test(pos);
+  }
+
+  void clear() {
+    handles.clear();
+    first_unset = 0;
+  }
+
+  // iterators
+
+  iterator begin() {
+    auto pos = handles.find_first();
+    if (pos == npos)
+      return iterator(this, -1);
+    else
+      return iterator(this, static_cast<handle_t>(pos));
+  }
+
+  const_iterator begin() const {
+    auto pos = handles.find_first();
+    if (pos == npos)
+      return const_iterator(this, -1);
+    else
+      return const_iterator(this, static_cast<handle_t>(pos));
+  }
+
+  iterator end() {
+    return iterator(this, -1);
+  }
+
+  const_iterator end() const {
+    return const_iterator(this, -1);
+  }
+
+ private:
+  size_type get_first_unset(size_type pos) {
+    size_type fe = pos + 1;
+    auto s = handles.size();
+    for (; fe < s && handles.test(fe); fe++) { }
+    return fe;
+  }
+
+  bitset handles;
+  size_type first_unset{0};
+};
+
+#endif  // ifdef JUDY1_ON
 
 }  // namespace bm
 

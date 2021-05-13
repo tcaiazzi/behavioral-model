@@ -46,10 +46,16 @@ AC_ARG_WITH([pdfixed],
 AM_CONDITIONAL([COND_PDFIXED], [test "$want_pdfixed" = yes])
 
 AC_ARG_WITH([nanomsg],
-    AS_HELP_STRING([--with-nanomsg], [Build Nanomsg RPC service, if disabled then you must have some other way of controlling the switch]),
+    AS_HELP_STRING([--with-nanomsg], [Support generating Nanomsg events]),
     [want_nanomsg="$withval"], [want_nanomsg=yes])
 
 AM_CONDITIONAL([COND_NANOMSG], [test "$want_nanomsg" = yes])
+
+AC_ARG_WITH([judy1],
+    AS_HELP_STRING([--with-judy1], [EXPERIMENTAL - Use Judy1 dynamic array [default=yes]]),
+    [want_judy1="$withval"], [want_judy1=yes])
+
+AM_CONDITIONAL([COND_JUDY1], [test "$want_judy1" = yes])
 
 debugger_enabled=no
 AC_ARG_ENABLE([debugger],
@@ -182,6 +188,12 @@ utility vector], [], [AC_MSG_ERROR([Missing header file])])
 AS_IF([test "$want_nanomsg" = yes], [
     AC_CHECK_LIB([nanomsg], [nn_errno], [], [AC_MSG_ERROR([Missing libnanomsg])])
     AC_DEFINE([NANOMSG_ON], [], [Enable Nanomsg support])
+])
+
+AS_IF([test "$want_judy1" = yes], [
+    AC_DEFINE([JUDY1_ON], [], [Enable Judy1 support])
+], [
+    AC_CHECK_HEADER([boost/dynamic_bitset.hpp], [], [AC_MSG_ERROR([Boost dynamic_bitset headers not found])])
 ])
 
 # Check for pthread, libjudy, libgmp, libpcap
@@ -326,3 +338,4 @@ AS_ECHO("Debugger enabled .............. : $debugger_enabled")
 AS_ECHO("With Thrift ................... : $want_thrift")
 AS_ECHO("With pdfixed .................. : $want_pdfixed")
 AS_ECHO("With PI ....................... : $want_pi")
+AS_ECHO("With Judy1 .................... : $want_judy1")
