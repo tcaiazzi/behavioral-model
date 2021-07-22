@@ -206,6 +206,8 @@ class Packet final {
 
   char *prepend(size_t bytes) { return buffer.push(bytes); }
 
+  void append(size_t bytes) { buffer.append(bytes); }
+
   char *remove(size_t bytes) {
     assert(buffer.get_data_size() >= payload_size + bytes);
     return buffer.pop(bytes);

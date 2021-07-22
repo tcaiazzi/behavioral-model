@@ -27,6 +27,7 @@
 #include <algorithm>  // for std::copy
 
 #include <cassert>
+#include <cstring>    // for std::memcpy
 
 namespace bm {
 
@@ -91,6 +92,16 @@ class PacketBuffer {
     data_size += bytes;
     head -= bytes;
     return head;
+  }
+
+  void append(size_t bytes) {
+    size += bytes;
+    data_size += bytes;
+
+    char *new_buffer = new char[size];
+    std::memcpy(new_buffer, buffer.get(), size - bytes);
+
+    buffer = std::unique_ptr<char[]>(new_buffer);
   }
 
   char *pop(size_t bytes) {

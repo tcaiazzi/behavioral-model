@@ -676,6 +676,15 @@ SimpleSwitch::egress_thread(size_t worker_id) {
 
     egress_mau->apply(packet.get());
 
+    bm::Data append_icrc(0);
+    bm::Context::RegisterErrorCode status = this->register_read(packet->get_context(), "bmv2_append_icrc", 0, &append_icrc);
+    if(status == bm::Register::SUCCESS) {
+      if(append_icrc.get_uint() == 1) {
+        BMLOG_DEBUG_PKT(*packet, "Appending 4 bytes at the end.");
+        packet->append(4);
+      }
+    }
+
     auto clone_mirror_session_id =
         RegisterAccess::get_clone_mirror_session_id(packet.get());
     auto clone_field_list = RegisterAccess::get_clone_field_list(packet.get());
